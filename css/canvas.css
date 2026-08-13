@@ -1,0 +1,201 @@
+/* Canvas & Workspace Layout Styles */
+
+#agility-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: crosshair;
+}
+
+/* Floating HUD Viewport Controls */
+.canvas-hud {
+  position: absolute;
+  bottom: 20px;
+  right: 20px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--glass-bg);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--glass-border);
+  padding: 6px 12px;
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  z-index: 60;
+}
+
+.hud-info {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 500;
+  padding: 0 8px;
+  border-right: 1px solid var(--panel-border);
+}
+
+.hud-info span {
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+/* Field Scale Ruler Indicator Overlay */
+.scale-ruler-overlay {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  background: var(--glass-bg);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--glass-border);
+  padding: 8px 14px;
+  border-radius: var(--radius-lg);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  z-index: 60;
+  box-shadow: var(--shadow-lg);
+}
+
+.ruler-bar {
+  width: 60px;
+  height: 6px;
+  background: linear-gradient(90deg, var(--accent-blue) 0%, var(--accent-blue) 100%);
+  border-left: 2px solid #ffffff;
+  border-right: 2px solid #ffffff;
+  position: relative;
+}
+
+.ruler-text {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+/* 2D / 3D View Mode Tab Switcher */
+.view-mode-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(15, 23, 42, 0.6);
+  padding: 4px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--panel-border);
+  margin-left: 12px;
+}
+
+.view-tab-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.2s ease;
+}
+
+.view-tab-btn:hover {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.view-tab-btn.active {
+  background: var(--accent-blue);
+  color: #ffffff;
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.4);
+}
+
+/* Workspace Views Container */
+.canvas-container {
+  position: relative;
+  flex: 1;
+  height: 100%;
+  overflow: hidden;
+  background: #060b13;
+}
+
+.workspace-view {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: none;
+}
+
+.workspace-view.active {
+  display: block;
+}
+
+#babylon-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  outline: none;
+  touch-action: none;
+}
+
+.hud-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: var(--text-main);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.2s ease;
+}
+
+.hud-btn:hover {
+  background: var(--accent-blue);
+  border-color: var(--accent-blue);
+}
+
+/* Sidebar Floating Edge Collapse Buttons */
+.sidebar-edge-toggle {
+  position: absolute;
+  top: 18px;
+  z-index: 80;
+  width: 24px;
+  height: 48px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--panel-border);
+  color: var(--text-muted);
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: var(--shadow-lg);
+  transition: all 0.2s ease;
+}
+
+.sidebar-edge-toggle.left {
+  left: 0;
+  border-top-right-radius: var(--radius-md);
+  border-bottom-right-radius: var(--radius-md);
+  border-left: none;
+}
+
+.sidebar-edge-toggle.right {
+  right: 0;
+  border-top-left-radius: var(--radius-md);
+  border-bottom-left-radius: var(--radius-md);
+  border-right: none;
+}
+
+.sidebar-edge-toggle:hover {
+  background: var(--accent-blue);
+  color: #ffffff;
+  width: 28px;
+  box-shadow: 0 0 14px rgba(56, 189, 248, 0.4);
+}
+
+

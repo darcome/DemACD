@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agility Course Designer - Field Builder & Reverse Wrap Trajectory</title>
+  <meta name="description" content="Interactive dog agility field builder and course designer app with custom field dimensions, obstacle scaling, dog wrap & reverse-wrap directions, and trajectory pathing.">
+
+  <!-- Google Fonts & FontAwesome -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha512-iecdLmaskl7CVkqkXNQ/ZH/XLlvWZOJyj7Yy7tcenmpD1ypASozpmT/E0iPtmFIB46ZmdtAc9eNBvH0H/ZpiBw==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+  
+  <!-- Babylon.js 3D Engine & Serializer CDN -->
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+  <script src="https://cdn.babylonjs.com/serializers/babylonjs.serializers.min.js"></script>
+
+  <!-- App Stylesheets -->
+  <link rel="stylesheet" href="css/main.css">
+  <link rel="stylesheet" href="css/canvas.css">
+  <link rel="stylesheet" href="css/components.css">
+</head>
+<body>
+
+  <div id="app-root">
+
+    <!-- Top Navigation Header -->
+    <header class="app-header">
+      <div class="brand-section">
+        <div class="brand-logo">
+          <i class="fa-solid fa-dog"></i>
+        </div>
+        <div class="brand-title">Agility Course Designer 1.0.1</div>
+      </div>
+
+      <!-- 2D / 3D View Mode Tab Switcher -->
+      <div class="view-mode-tabs">
+        <button id="tab-btn-2d" class="view-tab-btn active" title="2D Course Designer">
+          <i class="fa-solid fa-map"></i> 2D Layout
+        </button>
+        <button id="tab-btn-3d" class="view-tab-btn" title="Interactive 3D Course Preview (Babylon.js Visualizer)">
+          <i class="fa-solid fa-cube"></i> 3D View
+        </button>
+      </div>
+
+      <div class="header-actions">
+        <div class="header-group">
+          <button id="btn-undo" class="icon-btn" title="Undo (Ctrl+Z)" disabled>
+            <i class="fa-solid fa-rotate-left"></i>
+          </button>
+          <button id="btn-redo" class="icon-btn" title="Redo (Ctrl+Y)" disabled>
+            <i class="fa-solid fa-rotate-right"></i>
+          </button>
+        </div>
+
+        <div class="header-group">
+          <button id="btn-toggle-grid" class="icon-btn active" title="Toggle Field Grid">
+            <i class="fa-solid fa-border-all"></i>
+          </button>
+          <button id="btn-toggle-snap" class="icon-btn active" title="Toggle Grid Snapping">
+            <i class="fa-solid fa-magnet"></i>
+          </button>
+        </div>
+
+        <div class="header-group">
+          <button id="btn-toggle-path-nodes" class="sec-btn active" title="Toggle visibility of movable trajectory nodes">
+            <i class="fa-solid fa-bezier-curve"></i> Path Nodes
+          </button>
+          <button id="btn-bg-image" class="sec-btn" title="Embed Course Background Image Overlay (PNG/JPG)">
+            <i class="fa-solid fa-image"></i> Course Image
+          </button>
+          <input type="file" id="bg-image-input" accept="image/png, image/jpeg, image/webp" style="display: none;">
+          <button id="btn-field-settings" class="sec-btn" title="Field Dimensions & Shape">
+            <i class="fa-solid fa-sliders"></i> Field Shape
+          </button>
+          <button id="btn-clear" class="sec-btn danger-btn" title="Clear Ring Layout">
+            <i class="fa-solid fa-trash"></i>
+          </button>
+        </div>
+
+        <button id="btn-import-header" class="sec-btn" title="Import Saved Course (.json)">
+          <i class="fa-solid fa-folder-open"></i> Import JSON
+        </button>
+        <input type="file" id="header-json-input" accept=".json" style="display: none;">
+
+        <button id="btn-export" class="pri-btn">
+          <i class="fa-solid fa-download"></i> Export / Save
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Workspace Body -->
+    <div class="app-main">
+
+      <!-- Left Sidebar: Equipment Palette -->
+      <aside id="toolbar-palette" class="sidebar-palette"></aside>
+
+      <!-- Center Viewport Container (2D Canvas / 3D Babylon.js) -->
+      <main class="canvas-container">
+        
+        <!-- Sidebars Floating Edge Collapse Buttons -->
+        <button id="btn-toggle-left-sidebar" class="sidebar-edge-toggle left" title="Collapse / Expand Equipment Palette">
+          <i class="fa-solid fa-chevron-left"></i>
+        </button>
+        <button id="btn-toggle-right-sidebar" class="sidebar-edge-toggle right" title="Collapse / Expand Property Inspector">
+          <i class="fa-solid fa-chevron-right"></i>
+        </button>
+
+        <!-- 2D Canvas Workspace -->
+        <div id="view-2d-container" class="workspace-view active">
+          <canvas id="agility-canvas"></canvas>
+
+          <!-- Canvas Floating HUD controls -->
+          <div class="canvas-hud">
+            <div class="hud-info">
+              Field: <span id="hud-field-dim">40m × 20m</span>
+            </div>
+            <div class="hud-info">
+              Wheel to Zoom | Drag to Pan
+            </div>
+          </div>
+        </div>
+
+        <!-- 3D Babylon.js Workspace -->
+        <div id="view-3d-container" class="workspace-view">
+          <canvas id="babylon-canvas"></canvas>
+
+          <!-- 3D View Floating HUD controls -->
+          <div class="canvas-hud 3d-hud">
+            <div class="hud-info">
+              <i class="fa-solid fa-cube" style="color: #38bdf8;"></i> Babylon.js 3D View
+            </div>
+            <div class="hud-controls">
+              <div class="hud-btn" style="display: inline-flex; align-items: center; gap: 8px; background: rgba(15, 23, 42, 0.75); border: 1px solid rgba(255, 255, 255, 0.15); padding: 4px 10px; border-radius: 6px;" title="Adjust 3D Ground Transparency">
+                <span style="font-size: 11px; font-weight: 600; color: #e2e8f0; white-space: nowrap;"><i class="fa-solid fa-eye"></i> Ground Opacity: <span id="val-3d-ground-opacity">35%</span></span>
+                <input type="range" id="slider-3d-ground-opacity" min="0" max="1" step="0.05" value="0.35" class="app-range" style="width: 80px; height: 5px;">
+              </div>
+              <button id="btn-reset-3d-cam" class="hud-btn" title="Reset Camera View">
+                <i class="fa-solid fa-camera-rotate"></i> Reset Cam
+              </button>
+            </div>
+          </div>
+        </div>
+
+      </main>
+
+      <!-- Right Property Panel Inspector -->
+      <aside id="property-panel-container" class="property-panel"></aside>
+
+    </div>
+
+    <!-- Modals Containers -->
+    <div id="field-modal-container" class="modal-container"></div>
+    <div id="export-modal-container" class="modal-container"></div>
+
+  </div>
+
+  <!-- Standalone Application Scripts -->
+  <script src="js/babylonView.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
