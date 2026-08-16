@@ -85,6 +85,11 @@ class ArUcoTrackerUI {
     });
 
     this.initCameraDevices();
+
+    // If OpenCV initialized before ArUcoTrackerUI was mounted, update status immediately
+    if (window._arucoDetectorInitialized || (typeof cv !== 'undefined' && cv.Mat)) {
+      this.onOpenCvInitialized();
+    }
   }
 
   async initCameraDevices() {
