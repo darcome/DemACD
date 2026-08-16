@@ -29,18 +29,18 @@ class Aruco4x4Detector {
     // Set 4x4 Dictionary
     const dictId = options.dictType !== undefined ? options.dictType : (cv.DICT_4X4_50 ?? 0);
     const getDictFn = cv.getPredefinedDictionary || cv.aruco_getPredefinedDictionary;
-    this.dictionary = getDictFn(dictId);
+    this.dictionary = getDictFn ? getDictFn(dictId) : null;
 
     // ArUco Parameters
     const DetectorParamsClass = cv.aruco_DetectorParameters || cv.DetectorParameters;
-    this.detectorParams = new DetectorParamsClass();
+    this.detectorParams = DetectorParamsClass ? new DetectorParamsClass() : null;
 
     const RefineParamsClass = cv.aruco_RefineParameters || cv.RefineParameters;
     this.refineParams = RefineParamsClass ? new RefineParamsClass(10.0, 3.0, true) : null;
 
     // Initialize Detector
     const ArucoDetectorClass = cv.ArucoDetector || cv.aruco_ArucoDetector;
-    if (ArucoDetectorClass) {
+    if (ArucoDetectorClass && this.dictionary && this.detectorParams) {
       if (this.refineParams) {
         this.detector = new ArucoDetectorClass(this.dictionary, this.detectorParams, this.refineParams);
       } else {
@@ -231,18 +231,29 @@ class Aruco4x4Detector {
 }
 
 /**
- * OpenCV.js runtime loader hook requested by specification
+ * Robust initializer that ensures DOM and OpenCV WebAssembly runtime are both ready.
  */
-function onCvLoaded() {
-  const initOpenCvRuntime = () => {
-    const video = document.getElementById('webcam');
-    const canvas = document.getElementById('outputCanvas');
+function setupArucoDetector() {
+  if (window._arucoDetectorInitialized) return true;
+
+  if (typeof cv === 'undefined' || !cv.Mat) {
+    return false;
+  }
+
+  const video = document.getElementById('webcam');
+  const canvas = document.getElementById('outputCanvas');
+  if (!video || !canvas) {
+    return false;
+  }
+
+  try {
+    const dictId = (typeof cv.DICT_4X4_50 !== 'undefined') ? cv.DICT_4X4_50 : 0;
 
     detector = new Aruco4x4Detector(video, canvas, {
-      dictType: cv.DICT_4X4_50,
+      dictType: dictId,
       onDetect: (markers) => {
         markers.forEach((m) => {
-          //console.log(`Detected Marker ID: ${m.id} Center:`, m.center);
+          // console.log(`Detected Marker ID: ${m.id} Center:`, m.center);
         });
         if (window.arucoTracker) {
           window.arucoTracker.handleDetections(markers);
@@ -254,6 +265,7 @@ function onCvLoaded() {
     const stopBtn = document.getElementById('stopBtn');
 
     if (startBtn) {
+      startBtn.disabled = false;
       startBtn.onclick = () => {
         if (window.arucoTracker) {
           window.arucoTracker.startCamera();
@@ -272,18 +284,65 @@ function onCvLoaded() {
       };
     }
 
+    window._arucoDetectorInitialized = true;
+
     if (window.arucoTracker) {
       window.arucoTracker.onOpenCvInitialized();
+    } else {
+      const statusBadge = document.getElementById('aruco-status-badge');
+      if (statusBadge) {
+        statusBadge.className = 'aruco-status-badge ready';
+        statusBadge.innerHTML = '<span class="aruco-status-dot"></span> OpenCV Ready';
+      }
     }
-  };
 
-  if (typeof cv !== 'undefined' && cv.Mat) {
-    initOpenCvRuntime();
-  } else if (typeof cv !== 'undefined') {
-    cv['onRuntimeInitialized'] = initOpenCvRuntime;
+    console.log('[ArUco] OpenCV 4.x runtime and Aruco4x4Detector initialized successfully.');
+    return true;
+  } catch (err) {
+    console.error('[ArUco] setupArucoDetector error:', err);
+    const statusBadge = document.getElementById('aruco-status-badge');
+    if (statusBadge) {
+      statusBadge.className = 'aruco-status-badge loading';
+      statusBadge.innerHTML = `<span class="aruco-status-dot"></span> OpenCV Init Error`;
+      statusBadge.title = err.message || String(err);
+    }
+    return false;
   }
 }
 
-// Expose globally for window / OpenCV callback
+/**
+ * OpenCV.js runtime loader hook
+ */
+function onCvLoaded() {
+  window._cvLoadedFired = true;
+  if (typeof cv !== 'undefined') {
+    if (cv.Mat) {
+      setupArucoDetector();
+    } else {
+      cv['onRuntimeInitialized'] = () => {
+        setupArucoDetector();
+      };
+    }
+  }
+}
+
+// Expose globally
 window.onCvLoaded = onCvLoaded;
+window.setupArucoDetector = setupArucoDetector;
 window.Aruco4x4Detector = Aruco4x4Detector;
+
+// Auto-check on DOMContentLoaded
+document.addEventListener('DOMContentLoaded', () => {
+  setupArucoDetector();
+});
+
+// Periodic failsafe check (handles fast cache / async WebAssembly load on iOS Safari)
+(function() {
+  let attempts = 0;
+  const interval = setInterval(() => {
+    attempts++;
+    if (setupArucoDetector() || attempts > 60) {
+      clearInterval(interval);
+    }
+  }, 250);
+})();

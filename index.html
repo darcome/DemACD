@@ -36,6 +36,20 @@
 	  }
 	  return originalGetContext.call(this, type, attributes);
 	};
+
+    // Pre-declare onCvLoaded to prevent ReferenceError if opencv.js finishes before body scripts
+    window.onCvLoaded = function() {
+      window._cvLoadedFired = true;
+      if (typeof window.setupArucoDetector === 'function') {
+        window.setupArucoDetector();
+      } else if (typeof cv !== 'undefined') {
+        cv['onRuntimeInitialized'] = function() {
+          if (typeof window.setupArucoDetector === 'function') {
+            window.setupArucoDetector();
+          }
+        };
+      }
+    };
   </script>
 
   <!-- OpenCV 4.x Computer Vision WebAssembly Runtime -->
@@ -51,7 +65,7 @@
         <div class="brand-logo">
           <i class="fa-solid fa-dog"></i>
         </div>
-        <div class="brand-title">Agility Course Designer 1.1.2</div>
+        <div class="brand-title">Agility Course Designer 1.1.3</div>
       </div>
 
       <!-- 2D / 3D / ArUco View Mode Tab Switcher -->
