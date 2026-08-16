@@ -2642,31 +2642,51 @@
         if (next) this.canvasEngine.loadSnapshot(next);
       });
 
-      // 2D / 3D View Mode Tab Switching
+      // 2D / 3D / ArUco View Mode Tab Switching
       const tab2D = document.getElementById('tab-btn-2d');
       const tab3D = document.getElementById('tab-btn-3d');
+      const tabAruco = document.getElementById('tab-btn-aruco');
 
       const view2D = document.getElementById('view-2d-container');
       const view3D = document.getElementById('view-3d-container');
+      const viewAruco = document.getElementById('view-aruco-container');
+      const appRoot = document.getElementById('app-root');
 
       const switchTo2D = () => {
         tab2D?.classList.add('active');
         tab3D?.classList.remove('active');
+        tabAruco?.classList.remove('active');
         view2D?.classList.add('active');
         view3D?.classList.remove('active');
+        viewAruco?.classList.remove('active');
+        appRoot?.classList.remove('aruco-active');
         this.canvasEngine.render();
       };
 
       const switchTo3D = () => {
         tab3D?.classList.add('active');
         tab2D?.classList.remove('active');
+        tabAruco?.classList.remove('active');
         view3D?.classList.add('active');
         view2D?.classList.remove('active');
+        viewAruco?.classList.remove('active');
+        appRoot?.classList.remove('aruco-active');
         this.babylonEngine.updateScene(this.field, this.canvasEngine.obstacles, this.pathModel);
+      };
+
+      const switchToAruco = () => {
+        tabAruco?.classList.add('active');
+        tab2D?.classList.remove('active');
+        tab3D?.classList.remove('active');
+        viewAruco?.classList.add('active');
+        view2D?.classList.remove('active');
+        view3D?.classList.remove('active');
+        appRoot?.classList.add('aruco-active');
       };
 
       tab2D?.addEventListener('click', switchTo2D);
       tab3D?.addEventListener('click', switchTo3D);
+      tabAruco?.addEventListener('click', switchToAruco);
 
       document.getElementById('btn-reset-3d-cam')?.addEventListener('click', () => {
         this.babylonEngine.resetCamera();

@@ -20,6 +20,26 @@
   <link rel="stylesheet" href="css/main.css">
   <link rel="stylesheet" href="css/canvas.css">
   <link rel="stylesheet" href="css/components.css">
+  <link rel="stylesheet" href="css/aruco.css">
+
+  <script>
+    // Optimize 2D contexts for repeated pixel readbacks
+    const originalGetContext = HTMLCanvasElement.prototype.getContext;
+
+	HTMLCanvasElement.prototype.getContext = function (type, attributes) {
+	  // Only apply to OpenCV internal canvases (which have no ID) or the specific detector canvas
+	  if (type === '2d') {
+		const isDetectorCanvas = this.id === 'outputCanvas' || !this.id;
+		if (isDetectorCanvas) {
+		  attributes = Object.assign({}, attributes, { willReadFrequently: true });
+		}
+	  }
+	  return originalGetContext.call(this, type, attributes);
+	};
+  </script>
+
+  <!-- OpenCV 4.x Computer Vision WebAssembly Runtime -->
+  <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onCvLoaded()"></script>
 </head>
 <body>
 
@@ -31,16 +51,19 @@
         <div class="brand-logo">
           <i class="fa-solid fa-dog"></i>
         </div>
-        <div class="brand-title">Agility Course Designer 1.0.1</div>
+        <div class="brand-title">Agility Course Designer 1.1.1</div>
       </div>
 
-      <!-- 2D / 3D View Mode Tab Switcher -->
+      <!-- 2D / 3D / ArUco View Mode Tab Switcher -->
       <div class="view-mode-tabs">
         <button id="tab-btn-2d" class="view-tab-btn active" title="2D Course Designer">
           <i class="fa-solid fa-map"></i> 2D Layout
         </button>
         <button id="tab-btn-3d" class="view-tab-btn" title="Interactive 3D Course Preview (Babylon.js Visualizer)">
           <i class="fa-solid fa-cube"></i> 3D View
+        </button>
+        <button id="tab-btn-aruco" class="view-tab-btn" title="ArUco 4x4 Field Boundary & Calibration Detection">
+          <i class="fa-solid fa-camera"></i> ArUco Detect
         </button>
       </div>
 
@@ -96,7 +119,7 @@
       <!-- Left Sidebar: Equipment Palette -->
       <aside id="toolbar-palette" class="sidebar-palette"></aside>
 
-      <!-- Center Viewport Container (2D Canvas / 3D Babylon.js) -->
+      <!-- Center Viewport Container (2D Canvas / 3D Babylon.js / ArUco Detector) -->
       <main class="canvas-container">
         
         <!-- Sidebars Floating Edge Collapse Buttons -->
@@ -143,6 +166,134 @@
           </div>
         </div>
 
+        <!-- ArUco Marker Detector Workspace (75% Camera / 25% UI) -->
+        <div id="view-aruco-container" class="workspace-view">
+          <div class="aruco-workspace-layout">
+            
+            <!-- 75% Camera Feed Viewport -->
+            <div class="aruco-camera-viewport">
+              
+              <!-- Hidden Video element receiving stream -->
+              <video id="webcam" playsinline muted autoplay style="display: none;"></video>
+              
+              <!-- OpenCV Output Canvas -->
+              <div class="aruco-canvas-wrapper">
+                <canvas id="outputCanvas"></canvas>
+              </div>
+
+              <!-- Camera Placeholder state -->
+              <div id="aruco-camera-placeholder" class="aruco-camera-placeholder">
+                <div class="aruco-placeholder-icon">
+                  <i class="fa-solid fa-video"></i>
+                </div>
+                <div class="aruco-placeholder-text">Camera Feed Inactive</div>
+                <div class="aruco-placeholder-sub">Click <strong>Start Camera</strong> below to begin real-time 4x4 ArUco field marker tracking.</div>
+              </div>
+
+              <!-- Top Left Camera Meta Overlay -->
+              <div class="aruco-camera-meta-overlay">
+                <div class="aruco-meta-pill">OpenCV: <strong id="aruco-cv-ver">4.x (WebAssembly)</strong></div>
+                <div class="aruco-meta-pill">Performance: <strong id="aruco-fps-val">-- FPS</strong></div>
+                <div class="aruco-meta-pill">Dictionary: <strong>DICT_4X4_50</strong></div>
+              </div>
+
+              <!-- Floating Camera HUD Controls -->
+              <div class="aruco-camera-hud">
+                <div id="aruco-status-badge" class="aruco-status-badge loading">
+                  <span class="aruco-status-dot"></span> OpenCV Loading...
+                </div>
+
+                <select id="aruco-camera-select" class="aruco-select-device" title="Select Video Device">
+                  <option value="">Default Camera</option>
+                </select>
+
+                <button id="startBtn" class="aruco-hud-btn aruco-btn-start" disabled title="Start camera stream & marker tracking">
+                  <i class="fa-solid fa-play"></i> Start Camera
+                </button>
+                <button id="stopBtn" class="aruco-hud-btn aruco-btn-stop" disabled title="Stop camera stream">
+                  <i class="fa-solid fa-stop"></i> Stop
+                </button>
+              </div>
+
+            </div>
+
+            <!-- 25% UI Sidebar Panel: Detected Markers & Field Map -->
+            <aside class="aruco-ui-sidebar">
+              
+              <!-- Sidebar Header -->
+              <div class="aruco-sidebar-header">
+                <div class="aruco-sidebar-title">
+                  <i class="fa-solid fa-bullseye"></i> Field Marker Tracker
+                </div>
+                <div class="aruco-header-actions">
+                  <button id="btn-aruco-settings" class="aruco-icon-btn" title="Configure Marker IDs">
+                    <i class="fa-solid fa-gear"></i>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Sidebar Body -->
+              <div class="aruco-sidebar-body">
+                
+                <!-- Field Acquisition Metrics Card -->
+                <div class="aruco-metrics-card">
+                  <div class="aruco-metrics-header">
+                    <span class="aruco-metrics-label">Field Calibration</span>
+                    <span id="aruco-acquired-count" class="aruco-metrics-val"><span>0</span> / 8</span>
+                  </div>
+                  <div class="aruco-progress-track">
+                    <div id="aruco-progress-bar" class="aruco-progress-bar"></div>
+                  </div>
+                  <div class="aruco-metrics-chips">
+                    <div class="aruco-metric-chip">
+                      <span class="chip-label">Live Visible</span>
+                      <span id="aruco-live-count-chip" class="chip-val">0 Live</span>
+                    </div>
+                    <div class="aruco-metric-chip">
+                      <span class="chip-label">Corners</span>
+                      <span id="aruco-corner-count-chip" class="chip-val">0 / 4</span>
+                    </div>
+                    <div class="aruco-metric-chip">
+                      <span class="chip-label">Midpoints</span>
+                      <span id="aruco-mid-count-chip" class="chip-val">0 / 4</span>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Interactive Agility Field Diagram / Radar -->
+                <div class="aruco-field-map-container">
+                  <div class="aruco-section-title">
+                    <span>Field Perimeter Map</span>
+                    <span style="font-size: 10px; font-weight: 500; color: var(--text-dim);">8 Field Markers</span>
+                  </div>
+                  <div class="aruco-field-svg-wrap">
+                    <svg id="aruco-field-svg" class="aruco-field-svg" viewBox="0 0 200 110" preserveAspectRatio="xMidYMid meet"></svg>
+                  </div>
+                </div>
+
+                <!-- Marker Status List (8 cards) -->
+                <div class="aruco-section-title">
+                  <span>8x 4x4 Field Markers</span>
+                </div>
+                <div id="aruco-markers-list" class="aruco-markers-list"></div>
+
+              </div>
+
+              <!-- Sidebar Footer Actions -->
+              <div class="aruco-sidebar-footer">
+                <button id="btn-aruco-reset" class="sec-btn danger-btn" title="Reset all detected marker states">
+                  <i class="fa-solid fa-rotate-left"></i> Reset
+                </button>
+                <button id="btn-aruco-export" class="sec-btn" title="Export detected marker coordinates (JSON)">
+                  <i class="fa-solid fa-file-export"></i> Export JSON
+                </button>
+              </div>
+
+            </aside>
+
+          </div>
+        </div>
+
       </main>
 
       <!-- Right Property Panel Inspector -->
@@ -154,9 +305,30 @@
     <div id="field-modal-container" class="modal-container"></div>
     <div id="export-modal-container" class="modal-container"></div>
 
+    <!-- ArUco Marker ID Mapping Settings Modal -->
+    <div id="aruco-backdrop" class="aruco-backdrop"></div>
+    <div id="aruco-settings-modal" class="aruco-settings-modal">
+      <div class="aruco-modal-header">
+        <div class="aruco-modal-title">
+          <i class="fa-solid fa-sliders" style="color: var(--accent-blue);"></i> Configure Field Marker IDs
+        </div>
+      </div>
+      <div class="aruco-modal-body">
+        <div style="font-size: 12px; color: var(--text-dim); line-height: 1.4;">
+          Set the specific 4x4 ArUco marker ID (0 to 49) assigned to each of the 8 field boundary locations:
+        </div>
+        <div id="aruco-settings-inputs" style="display: flex; flex-direction: column; gap: 10px;"></div>
+      </div>
+      <div class="aruco-modal-footer">
+        <button id="btn-aruco-cancel-settings" class="sec-btn">Cancel</button>
+        <button id="btn-aruco-save-settings" class="pri-btn">Save Changes</button>
+      </div>
+    </div>
+
   </div>
 
   <!-- Standalone Application Scripts -->
+  <script src="js/arucoDetector.js"></script>
   <script src="js/babylonView.js"></script>
   <script src="js/app.js"></script>
 </body>

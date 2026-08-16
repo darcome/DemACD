@@ -1,0 +1,748 @@
+/* ArUco Marker Detector - 75% Camera / 25% UI Layout & Components */
+
+#app-root.aruco-active #toolbar-palette,
+#app-root.aruco-active #property-panel-container,
+#app-root.aruco-active #btn-toggle-left-sidebar,
+#app-root.aruco-active #btn-toggle-right-sidebar {
+  display: none !important;
+}
+
+.aruco-workspace-layout {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  background: #070b14;
+  overflow: hidden;
+  position: relative;
+}
+
+/* 75% Camera Feed Viewport */
+.aruco-camera-viewport {
+  flex: 0 0 75%;
+  width: 75%;
+  height: 100%;
+  position: relative;
+  background: #020610;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-right: 1px solid var(--panel-border);
+}
+
+.aruco-canvas-wrapper {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#outputCanvas {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  box-shadow: 0 0 30px rgba(0, 0, 0, 0.8);
+  border-radius: 4px;
+}
+
+/* Camera Placeholder when stream is off */
+.aruco-camera-placeholder {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  text-align: center;
+  color: var(--text-muted);
+  pointer-events: none;
+  z-index: 5;
+  transition: opacity 0.3s ease;
+}
+
+.aruco-camera-placeholder.hidden {
+  opacity: 0;
+}
+
+.aruco-placeholder-icon {
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  background: rgba(30, 41, 59, 0.6);
+  border: 2px dashed rgba(255, 255, 255, 0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 32px;
+  color: var(--accent-blue);
+  animation: pulse-ring 3s infinite;
+}
+
+@keyframes pulse-ring {
+  0% { box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.3); }
+  70% { box-shadow: 0 0 0 16px rgba(56, 189, 248, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(56, 189, 248, 0); }
+}
+
+.aruco-placeholder-text {
+  font-family: var(--font-heading);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.aruco-placeholder-sub {
+  font-size: 13px;
+  color: var(--text-dim);
+  max-width: 320px;
+}
+
+/* Floating Camera HUD Overlay */
+.aruco-camera-hud {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: rgba(15, 23, 42, 0.85);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  padding: 8px 16px;
+  border-radius: var(--radius-xl);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+  z-index: 40;
+}
+
+.aruco-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+}
+
+.aruco-status-badge.ready {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--accent-emerald);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.aruco-status-badge.streaming {
+  background: rgba(56, 189, 248, 0.15);
+  color: var(--accent-blue);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+}
+
+.aruco-status-badge.loading {
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--accent-amber);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.aruco-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.aruco-status-badge.streaming .aruco-status-dot {
+  animation: live-blink 1.2s infinite;
+}
+
+@keyframes live-blink {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.85); }
+}
+
+.aruco-hud-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: all 0.2s ease;
+}
+
+.aruco-btn-start {
+  background: linear-gradient(135deg, #10b981, #059669);
+  color: #ffffff;
+  box-shadow: 0 4px 14px rgba(16, 185, 129, 0.4);
+}
+
+.aruco-btn-start:hover:not(:disabled) {
+  background: linear-gradient(135deg, #059669, #047857);
+  transform: translateY(-1px);
+}
+
+.aruco-btn-stop {
+  background: rgba(244, 63, 94, 0.2);
+  color: var(--accent-rose);
+  border: 1px solid rgba(244, 63, 94, 0.4);
+}
+
+.aruco-btn-stop:hover:not(:disabled) {
+  background: rgba(244, 63, 94, 0.35);
+  color: #ffffff;
+}
+
+.aruco-hud-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none !important;
+}
+
+.aruco-select-device {
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: var(--text-main);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  font-size: 12px;
+  outline: none;
+  max-width: 160px;
+  cursor: pointer;
+}
+
+/* Top Left Overlay on Camera for FPS & Resolution */
+.aruco-camera-meta-overlay {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 40;
+  pointer-events: none;
+}
+
+.aruco-meta-pill {
+  background: rgba(15, 23, 42, 0.75);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.aruco-meta-pill strong {
+  color: var(--text-main);
+}
+
+/* 25% UI Sidebar Panel */
+.aruco-ui-sidebar {
+  flex: 0 0 25%;
+  width: 25%;
+  height: 100%;
+  background: var(--panel-bg);
+  backdrop-filter: blur(16px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-left: 1px solid var(--panel-border);
+}
+
+.aruco-sidebar-header {
+  padding: 16px;
+  border-bottom: 1px solid var(--panel-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: rgba(15, 23, 42, 0.5);
+}
+
+.aruco-sidebar-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-heading);
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-main);
+}
+
+.aruco-sidebar-title i {
+  color: var(--accent-blue);
+}
+
+.aruco-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.aruco-icon-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--panel-border);
+  color: var(--text-muted);
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.aruco-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: var(--text-main);
+}
+
+/* Scrollable Content inside 25% Sidebar */
+.aruco-sidebar-body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.aruco-sidebar-body::-webkit-scrollbar {
+  width: 6px;
+}
+
+.aruco-sidebar-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+
+/* Progress & Metrics Card */
+.aruco-metrics-card {
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.aruco-metrics-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.aruco-metrics-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+
+.aruco-metrics-val {
+  font-family: var(--font-heading);
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--text-main);
+}
+
+.aruco-metrics-val span {
+  color: var(--accent-emerald);
+}
+
+.aruco-progress-track {
+  width: 100%;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.aruco-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent-blue), var(--accent-emerald));
+  border-radius: 3px;
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.aruco-metrics-chips {
+  display: flex;
+  gap: 8px;
+}
+
+.aruco-metric-chip {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.aruco-metric-chip .chip-label {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.aruco-metric-chip .chip-val {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-main);
+}
+
+/* Agility Field Radar / Mini-Map Visualizer */
+.aruco-field-map-container {
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.aruco-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.aruco-field-svg-wrap {
+  width: 100%;
+  height: 140px;
+  background: #060b13;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.aruco-field-svg {
+  width: 92%;
+  height: 92%;
+}
+
+/* SVG Node states */
+.field-map-node {
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.field-map-node circle.node-bg {
+  fill: #1e293b;
+  stroke: #475569;
+  stroke-width: 1.5;
+  transition: all 0.3s ease;
+}
+
+.field-map-node text {
+  fill: #94a3b8;
+  font-size: 8.5px;
+  font-family: var(--font-body);
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: central;
+  user-select: none;
+  pointer-events: none;
+}
+
+/* Seen State */
+.field-map-node.state-seen circle.node-bg {
+  fill: #0c4a6e;
+  stroke: var(--accent-blue);
+  stroke-width: 2;
+}
+.field-map-node.state-seen text {
+  fill: #e0f2fe;
+}
+
+/* Live Active State */
+.field-map-node.state-live circle.node-bg {
+  fill: #065f46;
+  stroke: #34d399;
+  stroke-width: 2.5;
+  filter: drop-shadow(0 0 6px rgba(52, 211, 153, 0.8));
+}
+.field-map-node.state-live text {
+  fill: #ffffff;
+}
+
+/* Marker Cards List */
+.aruco-markers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.aruco-marker-card {
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: all 0.2s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.aruco-marker-card::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: #334155;
+  transition: background 0.2s ease;
+}
+
+.aruco-marker-card.state-seen {
+  border-color: rgba(56, 189, 248, 0.3);
+  background: rgba(15, 23, 42, 0.8);
+}
+.aruco-marker-card.state-seen::before {
+  background: var(--accent-blue);
+}
+
+.aruco-marker-card.state-live {
+  border-color: rgba(16, 185, 129, 0.5);
+  background: rgba(6, 78, 59, 0.15);
+  box-shadow: 0 0 16px rgba(16, 185, 129, 0.12);
+}
+.aruco-marker-card.state-live::before {
+  background: var(--accent-emerald);
+}
+
+.aruco-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.aruco-marker-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.aruco-id-pill {
+  background: rgba(255, 255, 255, 0.08);
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-main);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.aruco-marker-card.state-live .aruco-id-pill {
+  background: rgba(16, 185, 129, 0.25);
+  color: #34d399;
+  border-color: rgba(16, 185, 129, 0.4);
+}
+
+.aruco-marker-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.aruco-marker-type {
+  font-size: 10px;
+  color: var(--text-dim);
+  display: block;
+}
+
+.aruco-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  text-transform: uppercase;
+}
+
+.aruco-badge.badge-unseen {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-muted);
+}
+
+.aruco-badge.badge-seen {
+  background: rgba(56, 189, 248, 0.15);
+  color: var(--accent-blue);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+}
+
+.aruco-badge.badge-live {
+  background: rgba(16, 185, 129, 0.2);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.aruco-badge.badge-live::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #34d399;
+  animation: live-dot 1s infinite;
+}
+
+@keyframes live-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.3; transform: scale(0.8); }
+}
+
+.aruco-card-coords {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: rgba(0, 0, 0, 0.25);
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+}
+
+.aruco-card-coords span strong {
+  color: var(--text-main);
+  font-family: monospace;
+}
+
+.aruco-card-time {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* Sidebar Footer / Action Bar */
+.aruco-sidebar-footer {
+  padding: 12px 14px;
+  border-top: 1px solid var(--panel-border);
+  background: rgba(15, 23, 42, 0.5);
+  display: flex;
+  gap: 8px;
+}
+
+.aruco-sidebar-footer .sec-btn {
+  flex: 1;
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+/* Settings Modal for ArUco Marker ID Mapping */
+.aruco-settings-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: #0f172a;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-lg);
+  width: 90%;
+  max-width: 480px;
+  box-shadow: var(--shadow-lg);
+  z-index: 200;
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.aruco-settings-modal.active {
+  display: flex;
+}
+
+.aruco-modal-header {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--panel-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.aruco-modal-title {
+  font-family: var(--font-heading);
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-main);
+}
+
+.aruco-modal-body {
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.aruco-modal-footer {
+  padding: 12px 18px;
+  border-top: 1px solid var(--panel-border);
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.aruco-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(4px);
+  z-index: 190;
+  display: none;
+}
+
+.aruco-backdrop.active {
+  display: block;
+}
+
+/* Responsive adjustments */
+@media (max-width: 1024px) {
+  .aruco-workspace-layout {
+    flex-direction: column;
+  }
+  .aruco-camera-viewport {
+    flex: 0 0 60%;
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .aruco-ui-sidebar {
+    flex: 0 0 40%;
+    width: 100%;
+  }
+}
