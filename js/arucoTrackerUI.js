@@ -84,6 +84,81 @@ class ArUcoTrackerUI {
       this.flipCamera();
     });
 
+    // Initialize AR Course Walkthrough Engine
+    this.isArEnabled = false;
+    const arCanvas = document.getElementById('arBabylonCanvas');
+    if (arCanvas && typeof ARCourseEngine !== 'undefined') {
+      window.arCourseEngine = new ARCourseEngine(arCanvas);
+    }
+
+    // AR Mode Toggle Button
+    const arBtn = document.getElementById('btn-toggle-ar');
+    const arLabel = document.getElementById('ar-toggle-label');
+    const arBadge = document.getElementById('ar-tracking-badge');
+    const arPill = document.getElementById('ar-active-pill');
+
+    arBtn?.addEventListener('click', () => {
+      this.isArEnabled = !this.isArEnabled;
+      arBtn.classList.toggle('active', this.isArEnabled);
+      if (arLabel) arLabel.textContent = this.isArEnabled ? 'ON' : 'OFF';
+      if (arPill) {
+        arPill.textContent = this.isArEnabled ? 'Active (Live 3D)' : 'Disabled';
+        arPill.style.color = this.isArEnabled ? '#34d399' : 'var(--text-dim)';
+      }
+      if (arBadge) {
+        arBadge.style.display = this.isArEnabled ? 'inline-flex' : 'none';
+      }
+      if (window.arCourseEngine) {
+        window.arCourseEngine.setArActive(this.isArEnabled);
+        if (window.app) {
+          window.arCourseEngine.updateCourse(window.app.field, window.app.canvasEngine?.obstacles, window.app.pathModel);
+        }
+      }
+    });
+
+    // AR Ground Opacity Slider
+    const arGroundSlider = document.getElementById('slider-ar-ground-opacity');
+    const arGroundVal = document.getElementById('val-ar-ground-opacity');
+    arGroundSlider?.addEventListener('input', (e) => {
+      const val = parseFloat(e.target.value);
+      if (arGroundVal) {
+        arGroundVal.textContent = val === 0 ? '0% (Grass)' : `${Math.round(val * 100)}% Turf`;
+      }
+      if (window.arCourseEngine) {
+        window.arCourseEngine.setGroundOpacity(val);
+      }
+    });
+
+    // AR Marker Physical Size Input
+    const markerSizeInput = document.getElementById('input-ar-marker-size');
+    markerSizeInput?.addEventListener('input', (e) => {
+      const cm = parseFloat(e.target.value) || 20;
+      if (window.arCourseEngine) {
+        window.arCourseEngine.setMarkerSize(cm / 100);
+      }
+    });
+
+    // AR Trajectory & Number Toggles
+    const arTrajBtn = document.getElementById('btn-toggle-ar-traj');
+    arTrajBtn?.addEventListener('click', () => {
+      if (!window.arCourseEngine) return;
+      window.arCourseEngine.showTrajectory = !window.arCourseEngine.showTrajectory;
+      arTrajBtn.classList.toggle('active', window.arCourseEngine.showTrajectory);
+      if (window.app) {
+        window.arCourseEngine.updateCourse(window.app.field, window.app.canvasEngine?.obstacles, window.app.pathModel);
+      }
+    });
+
+    const arNumsBtn = document.getElementById('btn-toggle-ar-nums');
+    arNumsBtn?.addEventListener('click', () => {
+      if (!window.arCourseEngine) return;
+      window.arCourseEngine.showObstacleNumbers = !window.arCourseEngine.showObstacleNumbers;
+      arNumsBtn.classList.toggle('active', window.arCourseEngine.showObstacleNumbers);
+      if (window.app) {
+        window.arCourseEngine.updateCourse(window.app.field, window.app.canvasEngine?.obstacles, window.app.pathModel);
+      }
+    });
+
     this.initCameraDevices();
 
     // If OpenCV initialized before ArUcoTrackerUI was mounted, update status immediately
@@ -317,6 +392,11 @@ class ArUcoTrackerUI {
       this.fpsLastTime = now;
       const fpsEl = document.getElementById('aruco-fps-val');
       if (fpsEl) fpsEl.textContent = `${this.currentFps} FPS`;
+    }
+
+    // AR 6-DoF Pose Tracking Update
+    if (this.isArEnabled && window.arCourseEngine) {
+      window.arCourseEngine.updatePose(markers, this.idMapping);
     }
 
     this.updateUI();

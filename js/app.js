@@ -2682,6 +2682,10 @@
         view2D?.classList.remove('active');
         view3D?.classList.remove('active');
         appRoot?.classList.add('aruco-active');
+        if (window.arCourseEngine) {
+          window.arCourseEngine.updateCourse(this.field, this.canvasEngine.obstacles, this.pathModel);
+          window.arCourseEngine.resize();
+        }
       };
 
       tab2D?.addEventListener('click', switchTo2D);
@@ -2712,6 +2716,7 @@
         setTimeout(() => {
           this.canvasEngine.resizeCanvas();
           if (this.babylonEngine) this.babylonEngine.resize();
+          if (window.arCourseEngine) window.arCourseEngine.resize();
         }, 260);
       };
 
