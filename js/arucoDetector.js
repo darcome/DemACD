@@ -259,9 +259,9 @@ class ArUcoTrackerUI {
     this.markerStates = {};
     this.resetStates();
 
+    this.currentCamera = 'environment'; // 'environment' (rear), 'user' (front), or specific deviceId
     this.isOpenCvReady = false;
     this.isStreaming = false;
-    this.activeCameraId = null;
 
     this.fpsCounter = 0;
     this.fpsLastTime = performance.now();
@@ -310,61 +310,165 @@ class ArUcoTrackerUI {
       this.showSettingsModal();
     });
 
+    // Flip Camera button (Front <-> Rear)
+    document.getElementById('btn-flip-camera')?.addEventListener('click', () => {
+      this.flipCamera();
+    });
+
     this.initCameraDevices();
   }
 
   async initCameraDevices() {
+    const select = document.getElementById('aruco-camera-select');
+    if (select) {
+      select.addEventListener('change', async (e) => {
+        this.currentCamera = e.target.value;
+        if (detector && detector.isRunning) {
+          await this.startCamera(this.currentCamera);
+        }
+      });
+    }
+
+    await this.refreshCameraDevices();
+  }
+
+  async refreshCameraDevices() {
+    const select = document.getElementById('aruco-camera-select');
+    if (!select) return;
+
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
       const devices = await navigator.mediaDevices.enumerateDevices();
       const videoDevices = devices.filter(d => d.kind === 'videoinput');
-      const select = document.getElementById('aruco-camera-select');
-      if (select) {
-        select.innerHTML = '';
-        if (videoDevices.length === 0) {
-          const opt = document.createElement('option');
-          opt.value = '';
-          opt.textContent = 'Default Camera';
-          select.appendChild(opt);
-        } else {
-          videoDevices.forEach((dev, idx) => {
-            const opt = document.createElement('option');
-            opt.value = dev.deviceId;
-            opt.textContent = dev.label || `Camera ${idx + 1}`;
-            select.appendChild(opt);
-          });
-        }
 
-        select.addEventListener('change', async (e) => {
-          this.activeCameraId = e.target.value;
-          if (detector && detector.isRunning) {
-            detector.stop();
-            await this.startDetectorWithDevice(this.activeCameraId);
-          }
+      const prevValue = this.currentCamera || select.value || 'environment';
+
+      select.innerHTML = `
+        <option value="environment">📷 Rear / Back Camera</option>
+        <option value="user">🤳 Front Camera</option>
+      `;
+
+      // If we have identified physical devices with labels
+      const labeledDevices = videoDevices.filter(d => d.label && d.label.trim().length > 0);
+      if (labeledDevices.length > 0) {
+        const optGroup = document.createElement('optgroup');
+        optGroup.label = 'Available Hardware Cameras';
+        labeledDevices.forEach((dev, idx) => {
+          const opt = document.createElement('option');
+          opt.value = dev.deviceId;
+          const isBack = /back|rear|environment/i.test(dev.label);
+          const isFront = /front|user|facetime/i.test(dev.label);
+          const icon = isBack ? '📷 ' : (isFront ? '🤳 ' : '📹 ');
+          opt.textContent = `${icon}${dev.label}`;
+          optGroup.appendChild(opt);
         });
+        select.appendChild(optGroup);
+      }
+
+      // Restore value if option exists, otherwise keep current
+      if ([...select.options].some(o => o.value === prevValue)) {
+        select.value = prevValue;
+      } else {
+        select.value = this.currentCamera || 'environment';
       }
     } catch (err) {
-      console.warn('Camera enumeration error:', err);
+      console.warn('Camera device enumeration error:', err);
     }
   }
 
-  async startDetectorWithDevice(deviceId) {
+  async flipCamera() {
+    const select = document.getElementById('aruco-camera-select');
+    // If currently environment or back camera, switch to front; else switch to back
+    if (this.currentCamera === 'environment') {
+      this.currentCamera = 'user';
+    } else if (this.currentCamera === 'user') {
+      this.currentCamera = 'environment';
+    } else {
+      this.currentCamera = (this.currentCamera.includes('front') || this.currentCamera === 'user') ? 'environment' : 'user';
+    }
+
+    if (select) {
+      select.value = this.currentCamera;
+    }
+
+    if (detector && detector.isRunning) {
+      await this.startCamera(this.currentCamera);
+    }
+  }
+
+  async startCamera(cameraSelection) {
     if (!detector) return;
-    const constraints = {
-      video: deviceId ? { deviceId: { exact: deviceId }, width: 1280, height: 720 } : { width: 1280, height: 720 }
-    };
+    if (cameraSelection) {
+      this.currentCamera = cameraSelection;
+    } else {
+      const select = document.getElementById('aruco-camera-select');
+      this.currentCamera = (select && select.value) ? select.value : 'environment';
+    }
+
+    // Stop existing stream if currently running
+    if (detector.isRunning) {
+      detector.stop();
+    }
+
+    let videoConstraint = {};
+
+    if (this.currentCamera === 'user') {
+      videoConstraint = {
+        facingMode: { ideal: 'user' },
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      };
+    } else if (this.currentCamera === 'environment') {
+      videoConstraint = {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      };
+    } else if (this.currentCamera && this.currentCamera.length > 0) {
+      videoConstraint = {
+        deviceId: { exact: this.currentCamera },
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      };
+    } else {
+      videoConstraint = {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      };
+    }
+
     try {
-      await detector.start(constraints);
+      await detector.start({ video: videoConstraint });
       this.onCameraStarted();
+      // Re-enumerate to get full camera labels on iOS now that permission is active
+      await this.refreshCameraDevices();
     } catch (err) {
-      console.warn('High resolution failed, trying fallback 640x480:', err);
+      console.warn('Failed with primary video constraints, trying fallback facingMode:', err);
       try {
-        await detector.start({ video: true });
+        const fallbackFacing = this.currentCamera === 'user' ? 'user' : 'environment';
+        await detector.start({
+          video: {
+            facingMode: fallbackFacing
+          }
+        });
         this.onCameraStarted();
+        await this.refreshCameraDevices();
       } catch (fallbackErr) {
-        alert('Could not start camera: ' + fallbackErr.message);
+        console.warn('Fallback facingMode failed, trying generic video constraint:', fallbackErr);
+        try {
+          await detector.start({ video: true });
+          this.onCameraStarted();
+          await this.refreshCameraDevices();
+        } catch (finalErr) {
+          alert('Could not start camera: ' + (finalErr.message || finalErr));
+        }
       }
     }
+  }
+
+  startDetectorWithDevice(selection) {
+    return this.startCamera(selection);
   }
 
   onOpenCvInitialized() {

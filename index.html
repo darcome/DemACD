@@ -51,7 +51,7 @@
         <div class="brand-logo">
           <i class="fa-solid fa-dog"></i>
         </div>
-        <div class="brand-title">Agility Course Designer 1.1.1</div>
+        <div class="brand-title">Agility Course Designer 1.1.2</div>
       </div>
 
       <!-- 2D / 3D / ArUco View Mode Tab Switcher -->
@@ -203,9 +203,14 @@
                   <span class="aruco-status-dot"></span> OpenCV Loading...
                 </div>
 
-                <select id="aruco-camera-select" class="aruco-select-device" title="Select Video Device">
-                  <option value="">Default Camera</option>
+                <select id="aruco-camera-select" class="aruco-select-device" title="Select Video Device / Facing Mode">
+                  <option value="environment" selected>📷 Rear / Back Camera</option>
+                  <option value="user">🤳 Front Camera</option>
                 </select>
+
+                <button id="btn-flip-camera" class="aruco-hud-btn sec-btn" title="Switch Front/Rear Camera">
+                  <i class="fa-solid fa-camera-rotate"></i> Flip Cam
+                </button>
 
                 <button id="startBtn" class="aruco-hud-btn aruco-btn-start" disabled title="Start camera stream & marker tracking">
                   <i class="fa-solid fa-play"></i> Start Camera
