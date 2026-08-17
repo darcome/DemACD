@@ -167,10 +167,12 @@ class ARPoseEstimator {
       objMat = cv.matFromArray(numPoints, 3, cv.CV_64FC1, objPointsArr);
       imgMat = cv.matFromArray(numPoints, 2, cv.CV_64FC1, imgPointsArr);
 
-      // Use IPPE for planar marker sets if available, otherwise iterative
-      const solveFlag = (typeof cv.SOLVEPNP_IPPE !== 'undefined') 
-        ? cv.SOLVEPNP_IPPE 
-        : cv.SOLVEPNP_ITERATIVE;
+      // Prefer the iterative solver for multi-marker planar layouts.
+      // IPPE is optimized for a single square marker and can flip between
+      // ambiguous planar solutions when more points are involved.
+      const solveFlag = (typeof cv.SOLVEPNP_ITERATIVE !== 'undefined')
+        ? cv.SOLVEPNP_ITERATIVE
+        : (typeof cv.SOLVEPNP_EPNP !== 'undefined' ? cv.SOLVEPNP_EPNP : 0);
 
       const solved = cv.solvePnP(
         objMat,
@@ -208,12 +210,8 @@ class ARPoseEstimator {
       const upBabylon      = new BABYLON.Vector3(-r10, -r11, -r12).normalize();
       const forwardBabylon = new BABYLON.Vector3(r20, r21, r22).normalize();
 
-      const rotMatrix = BABYLON.Matrix.FromValues(
-        rightBabylon.x,   rightBabylon.y,   rightBabylon.z,   0,
-        upBabylon.x,      upBabylon.y,      upBabylon.z,      0,
-        forwardBabylon.x, forwardBabylon.y, forwardBabylon.z, 0,
-        0,                0,                0,                1
-      );
+      const rotMatrix = BABYLON.Matrix.Identity();
+      BABYLON.Matrix.FromXYZAxesToRef(rightBabylon, upBabylon, forwardBabylon, rotMatrix);
 
       const rawQuat = BABYLON.Quaternion.FromRotationMatrix(rotMatrix);
 
