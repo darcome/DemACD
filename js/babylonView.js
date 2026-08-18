@@ -150,7 +150,48 @@ class BabylonEngine {
   fieldToWorld3D(fieldX, fieldY, fieldHeight = 0) {
     return Course3DBuilder.fieldToWorld3D(fieldX, fieldY, fieldHeight, this.currentField);
   }
+
+  /**
+   * Export the current 3D course model to .glb binary format and trigger browser download
+   * @param {string} [filename] Optional custom output filename
+   * @returns {Promise<any>}
+   */
+  async exportGLB(filename = null) {
+    if (!this.isInitialized || !this.scene) {
+      this._initScene();
+      if (!this.isInitialized || !this.scene) {
+        throw new Error("Babylon 3D scene is not initialized.");
+      }
+    }
+
+    if (this.currentField) {
+      this.updateScene(this.currentField, this.currentObstacles, this.currentPathModel);
+    }
+
+    if (typeof BABYLON === 'undefined' || !BABYLON.GLTF2Export || typeof BABYLON.GLTF2Export.GLBAsync !== 'function') {
+      throw new Error("BABYLON.GLTF2Export serializer is not loaded. Please ensure babylonjs.serializers.min.js is included.");
+    }
+
+    const defaultName = `Agility_Course_3D_${Date.now()}`;
+    const cleanFilename = (filename || defaultName).replace(/\.glb$/i, '');
+
+    try {
+      const glbData = await BABYLON.GLTF2Export.GLBAsync(this.scene, cleanFilename, {
+        shouldExportNode: (node) => {
+          // Do not export the orbit camera
+          if (node === this.camera) return false;
+          return true;
+        }
+      });
+      glbData.downloadFiles();
+      return glbData;
+    } catch (err) {
+      console.error("[BabylonEngine] GLB export failed:", err);
+      throw err;
+    }
+  }
 }
 
 // Global instance
 window.BabylonEngine = BabylonEngine;
+
