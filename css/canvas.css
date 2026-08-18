@@ -137,6 +137,12 @@
   touch-action: none;
 }
 
+.hud-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .hud-btn {
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.15);
@@ -155,6 +161,19 @@
 .hud-btn:hover {
   background: var(--accent-blue);
   border-color: var(--accent-blue);
+}
+
+.hud-btn.hud-btn-export {
+  background: rgba(14, 165, 233, 0.18);
+  border-color: rgba(56, 189, 248, 0.45);
+  color: #38bdf8;
+}
+
+.hud-btn.hud-btn-export:hover {
+  background: var(--accent-blue);
+  border-color: var(--accent-blue);
+  color: #ffffff;
+  box-shadow: 0 0 14px rgba(56, 189, 248, 0.4);
 }
 
 /* Sidebar Floating Edge Collapse Buttons */

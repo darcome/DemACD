@@ -2497,11 +2497,12 @@
   }
 
   class ExportModal {
-    constructor(modalEl, canvasEngine, pathModel, historyManager) {
+    constructor(modalEl, canvasEngine, pathModel, historyManager, babylonEngine = null) {
       this.modal = modalEl;
       this.canvasEngine = canvasEngine;
       this.pathModel = pathModel;
       this.historyManager = historyManager;
+      this.babylonEngine = babylonEngine;
     }
     show() { this._render(); this.modal.classList.add('active'); }
     hide() { this.modal.classList.remove('active'); }
@@ -2530,6 +2531,11 @@
                 <div class="export-icon"><i class="fa-solid fa-file-code"></i></div>
                 <div class="export-title">Save JSON File</div>
                 <div class="export-desc">Save editable course design file</div>
+              </div>
+              <div class="export-card" id="btn-export-glb">
+                <div class="export-icon" style="color: var(--accent-blue);"><i class="fa-solid fa-cube"></i></div>
+                <div class="export-title">Export 3D Model (.glb)</div>
+                <div class="export-desc">Download 3D scene with obstacles & trajectory</div>
               </div>
               <div class="export-card" id="btn-modal-import-json">
                 <div class="export-icon" style="color: var(--accent-emerald);"><i class="fa-solid fa-folder-open"></i></div>
@@ -2567,6 +2573,33 @@
         link.href = url;
         link.click();
         URL.revokeObjectURL(url);
+      });
+
+      const exportGlbCard = this.modal.querySelector('#btn-export-glb');
+      exportGlbCard?.addEventListener('click', async () => {
+        if (!this.babylonEngine) {
+          alert('3D Engine is not available.');
+          return;
+        }
+        const titleEl = exportGlbCard.querySelector('.export-title');
+        const origTitle = titleEl ? titleEl.innerHTML : '';
+        try {
+          exportGlbCard.style.pointerEvents = 'none';
+          if (titleEl) titleEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Exporting .GLB...';
+          this.babylonEngine.updateScene(this.canvasEngine.field, this.canvasEngine.obstacles, this.pathModel);
+          await this.babylonEngine.exportGLB(`Agility_Course_3D_${Date.now()}`);
+          if (titleEl) titleEl.innerHTML = '<i class="fa-solid fa-check" style="color: var(--accent-emerald);"></i> Exported .GLB!';
+          setTimeout(() => {
+            if (titleEl) titleEl.innerHTML = origTitle;
+            exportGlbCard.style.pointerEvents = 'auto';
+            this.hide();
+          }, 1000);
+        } catch (err) {
+          console.error("GLB Export error:", err);
+          alert(`Failed to export GLB: ${err.message || err}`);
+          if (titleEl) titleEl.innerHTML = origTitle;
+          exportGlbCard.style.pointerEvents = 'auto';
+        }
       });
 
       const importCard = this.modal.querySelector('#btn-modal-import-json');
@@ -2612,7 +2645,7 @@
       this.toolbar = new Toolbar(document.getElementById('toolbar-palette'), this.canvasEngine, this.field, this.historyManager);
       this.propertyPanel = new PropertyPanel(document.getElementById('property-panel-container'), this.canvasEngine, this.historyManager);
       this.fieldModal = new FieldModal(document.getElementById('field-modal-container'), this.field, this.canvasEngine, this.historyManager);
-      this.exportModal = new ExportModal(document.getElementById('export-modal-container'), this.canvasEngine, this.pathModel, this.historyManager);
+      this.exportModal = new ExportModal(document.getElementById('export-modal-container'), this.canvasEngine, this.pathModel, this.historyManager, this.babylonEngine);
 
       this._bindHeaderActions();
       
@@ -2694,6 +2727,31 @@
 
       document.getElementById('btn-reset-3d-cam')?.addEventListener('click', () => {
         this.babylonEngine.resetCamera();
+      });
+
+      const btnExport3DGlb = document.getElementById('btn-export-3d-glb');
+      btnExport3DGlb?.addEventListener('click', async () => {
+        if (!this.babylonEngine) return;
+        const origHtml = btnExport3DGlb.innerHTML;
+        try {
+          btnExport3DGlb.disabled = true;
+          btnExport3DGlb.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Exporting...';
+          
+          this.babylonEngine.updateScene(this.field, this.canvasEngine.obstacles, this.pathModel);
+          const filename = `Agility_Course_3D_${Date.now()}`;
+          await this.babylonEngine.exportGLB(filename);
+
+          btnExport3DGlb.innerHTML = '<i class="fa-solid fa-check"></i> Exported!';
+          setTimeout(() => {
+            btnExport3DGlb.innerHTML = origHtml;
+            btnExport3DGlb.disabled = false;
+          }, 2000);
+        } catch (err) {
+          console.error("Failed to export GLB:", err);
+          alert(`Export failed: ${err.message || err}`);
+          btnExport3DGlb.innerHTML = origHtml;
+          btnExport3DGlb.disabled = false;
+        }
       });
 
       const groundOpacitySlider = document.getElementById('slider-3d-ground-opacity');
