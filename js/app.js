@@ -2607,7 +2607,12 @@
       this.canvasEngine = new CanvasEngine(this.canvasElement, this.field, this.pathModel, this.historyManager);
 
       this.babylonCanvas = document.getElementById('babylon-canvas');
-      this.babylonEngine = new BabylonEngine(this.babylonCanvas);
+      this.babylonEngine = new BabylonEngine(this.babylonCanvas, { mode: 'orbit' });
+
+      this.arucoBabylonCanvas = document.getElementById('aruco-babylon-canvas');
+      this.arucoBabylonEngine = new BabylonEngine(this.arucoBabylonCanvas, { mode: 'ar' });
+      this.showAr3DCourse = true;
+      window.agilityApp = this;
 
       this.toolbar = new Toolbar(document.getElementById('toolbar-palette'), this.canvasEngine, this.field, this.historyManager);
       this.propertyPanel = new PropertyPanel(document.getElementById('property-panel-container'), this.canvasEngine, this.historyManager);
@@ -2626,6 +2631,38 @@
       this.historyManager.clear();
       this.historyManager.push(this.canvasEngine.getSnapshot());
     }
+
+    onArMarkersDetected(detectedMarkers, imgWidth, imgHeight) {
+      if (!this.arucoBabylonEngine || !this.showAr3DCourse) return;
+
+      const idToKeyMap = window.arucoTracker ? window.arucoTracker.getIdToKeyMap() : {};
+      const res = this.arucoBabylonEngine.alignWithMarkers(
+        detectedMarkers,
+        this.field,
+        imgWidth || 1280,
+        imgHeight || 720,
+        idToKeyMap
+      );
+
+      const statusTextEl = document.getElementById('aruco-ar-status-text');
+      if (statusTextEl && res) {
+        if (res.status === 'locked') {
+          statusTextEl.innerHTML = `<i class="fa-solid fa-anchor" style="color: #f87171;"></i> 3D: Anchor Locked`;
+        } else if (res.status === 'multi') {
+          statusTextEl.innerHTML = `<i class="fa-solid fa-cube" style="color: #34d399;"></i> 3D: ${res.markerCount} Markers Aligned`;
+        } else if (res.status === 'single') {
+          const mKey = res.primaryKey || 'Single';
+          const def = window.arucoTracker?.markerDefinitions.find(d => d.key === mKey);
+          const name = def ? def.name : mKey;
+          statusTextEl.innerHTML = `<i class="fa-solid fa-cube" style="color: #38bdf8;"></i> 3D: Aligned (${name})`;
+        } else if (res.status === 'holding') {
+          statusTextEl.innerHTML = `<i class="fa-solid fa-clock" style="color: #fbbf24;"></i> 3D: Holding Anchor...`;
+        } else {
+          statusTextEl.innerHTML = `<i class="fa-solid fa-magnifying-glass" style="color: #94a3b8;"></i> 3D: Searching Marker...`;
+        }
+      }
+    }
+
     _bindHeaderActions() {
       const undoBtn = document.getElementById('btn-undo');
       const redoBtn = document.getElementById('btn-redo');
@@ -2682,6 +2719,11 @@
         view2D?.classList.remove('active');
         view3D?.classList.remove('active');
         appRoot?.classList.add('aruco-active');
+        // Synchronize AR 3D Course with current field, obstacles and path
+        if (this.arucoBabylonEngine) {
+          this.arucoBabylonEngine.updateScene(this.field, this.canvasEngine.obstacles, this.pathModel);
+          this.arucoBabylonEngine.resize();
+        }
       };
 
       tab2D?.addEventListener('click', switchTo2D);
@@ -2699,6 +2741,47 @@
         if (groundOpacityVal) groundOpacityVal.textContent = `${Math.round(val * 100)}%`;
         if (this.babylonEngine) {
           this.babylonEngine.setGroundOpacity(val);
+        }
+      });
+
+      // AR 3D Viewport Controls
+      const btnToggleAr3D = document.getElementById('btn-toggle-ar-3d');
+      btnToggleAr3D?.addEventListener('click', () => {
+        this.showAr3DCourse = !this.showAr3DCourse;
+        btnToggleAr3D.classList.toggle('active', this.showAr3DCourse);
+        if (this.arucoBabylonEngine) {
+          this.arucoBabylonEngine.setCourseVisible(this.showAr3DCourse);
+        }
+      });
+
+      const btnLockAnchor = document.getElementById('btn-ar-lock-anchor');
+      btnLockAnchor?.addEventListener('click', async () => {
+        if (!window.arucoPoseEstimator) return;
+        if (!window.arucoPoseEstimator.hasGyro) {
+          await window.arucoPoseEstimator.requestGyroPermission();
+        }
+        const isLocked = window.arucoPoseEstimator.toggleAnchorLock();
+        btnLockAnchor.classList.toggle('locked', isLocked);
+        btnLockAnchor.innerHTML = isLocked
+          ? '<i class="fa-solid fa-lock"></i> Anchor Locked'
+          : '<i class="fa-solid fa-anchor"></i> Lock Anchor';
+        btnLockAnchor.title = isLocked
+          ? 'Anchor locked! You can now walk around the field without losing 3D alignment'
+          : 'Lock 3D Course Anchor to walk around the field without marker in view';
+
+        const statusTextEl = document.getElementById('aruco-ar-status-text');
+        if (statusTextEl && isLocked) {
+          statusTextEl.innerHTML = '<i class="fa-solid fa-anchor" style="color: #f87171;"></i> 3D: Anchor Locked';
+        }
+      });
+
+      const arGroundSlider = document.getElementById('slider-ar-ground-opacity');
+      const arGroundVal = document.getElementById('val-ar-ground-opacity');
+      arGroundSlider?.addEventListener('input', e => {
+        const val = parseFloat(e.target.value);
+        if (arGroundVal) arGroundVal.textContent = `${Math.round(val * 100)}%`;
+        if (this.arucoBabylonEngine) {
+          this.arucoBabylonEngine.setGroundOpacity(val);
         }
       });
 

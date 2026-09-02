@@ -29,6 +29,7 @@ class ArUcoTrackerUI {
     this.resetStates();
 
     this.currentCamera = 'environment'; // 'environment' (rear), 'user' (front), or specific deviceId
+    this.markerSizeMeters = 0.25;       // Default 25 cm physical marker size
     this.isOpenCvReady = false;
     this.isStreaming = false;
 
@@ -38,6 +39,14 @@ class ArUcoTrackerUI {
 
     this.tickerInterval = null;
     this.initDOM();
+  }
+
+  getIdToKeyMap() {
+    const map = {};
+    this.markerDefinitions.forEach(m => {
+      map[this.idMapping[m.key]] = m.key;
+    });
+    return map;
   }
 
   resetStates() {
@@ -523,10 +532,23 @@ class ArUcoTrackerUI {
     URL.revokeObjectURL(url);
   }
 
+  setArStatus(text) {
+    const statusEl = document.getElementById('aruco-ar-status-text');
+    if (statusEl) {
+      statusEl.textContent = text;
+    }
+  }
+
   showSettingsModal() {
     const modal = document.getElementById('aruco-settings-modal');
     const backdrop = document.getElementById('aruco-backdrop');
     if (!modal || !backdrop) return;
+
+    // Populate physical marker size input
+    const sizeInput = document.getElementById('input-aruco-marker-size');
+    if (sizeInput) {
+      sizeInput.value = this.markerSizeMeters || 0.25;
+    }
 
     const list = document.getElementById('aruco-settings-inputs');
     if (list) {
@@ -563,6 +585,19 @@ class ArUcoTrackerUI {
 
     if (saveBtn) {
       saveBtn.onclick = () => {
+        // Save physical marker size
+        const sizeInput = document.getElementById('input-aruco-marker-size');
+        if (sizeInput) {
+          const sizeVal = parseFloat(sizeInput.value);
+          if (sizeVal > 0) {
+            this.markerSizeMeters = sizeVal;
+            if (window.arucoPoseEstimator) {
+              window.arucoPoseEstimator.setMarkerSize(sizeVal);
+            }
+          }
+        }
+
+        // Save marker IDs
         this.markerDefinitions.forEach(m => {
           const input = document.getElementById(`input-aruco-id-${m.key}`);
           if (input) {

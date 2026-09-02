@@ -90,6 +90,15 @@ class Aruco4x4Detector {
     this.canvas.width = width;
     this.canvas.height = height;
 
+    const babylonArCanvas = document.getElementById('aruco-babylon-canvas');
+    if (babylonArCanvas) {
+      babylonArCanvas.width = width;
+      babylonArCanvas.height = height;
+    }
+    if (window.agilityApp && window.agilityApp.arucoBabylonEngine) {
+      window.agilityApp.arucoBabylonEngine.resize();
+    }
+
     this.cap = new cv.VideoCapture(this.video);
     if (this.src) this.src.delete();
     if (this.rgb) this.rgb.delete();
@@ -128,6 +137,16 @@ class Aruco4x4Detector {
         this.video.height = vHeight;
         this.canvas.width = vWidth;
         this.canvas.height = vHeight;
+
+        const babylonArCanvas = document.getElementById('aruco-babylon-canvas');
+        if (babylonArCanvas) {
+          babylonArCanvas.width = vWidth;
+          babylonArCanvas.height = vHeight;
+        }
+        if (window.agilityApp && window.agilityApp.arucoBabylonEngine) {
+          window.agilityApp.arucoBabylonEngine.resize();
+        }
+
         this.src = new cv.Mat(vHeight, vWidth, cv.CV_8UC4);
         this.rgb = new cv.Mat(vHeight, vWidth, cv.CV_8UC3);
         this.gray = new cv.Mat(vHeight, vWidth, cv.CV_8UC1);
@@ -181,7 +200,8 @@ class Aruco4x4Detector {
 
       cv.imshow(this.canvas, this.rgb);
 
-      if (this.onDetect && detectedMarkers.length > 0) {
+      // Always notify onDetect so pose estimator can handle tracking, grace period, and anchor holding
+      if (this.onDetect) {
         this.onDetect(detectedMarkers);
       }
     } catch (err) {
@@ -252,11 +272,13 @@ function setupArucoDetector() {
     detector = new Aruco4x4Detector(video, canvas, {
       dictType: dictId,
       onDetect: (markers) => {
-        markers.forEach((m) => {
-          // console.log(`Detected Marker ID: ${m.id} Center:`, m.center);
-        });
         if (window.arucoTracker) {
           window.arucoTracker.handleDetections(markers);
+        }
+        if (window.agilityApp && typeof window.agilityApp.onArMarkersDetected === 'function') {
+          const w = canvas.width || 1280;
+          const h = canvas.height || 720;
+          window.agilityApp.onArMarkersDetected(markers, w, h);
         }
       }
     });
