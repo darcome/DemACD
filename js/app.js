@@ -2497,12 +2497,11 @@
   }
 
   class ExportModal {
-    constructor(modalEl, canvasEngine, pathModel, historyManager, babylonEngine = null) {
+    constructor(modalEl, canvasEngine, pathModel, historyManager) {
       this.modal = modalEl;
       this.canvasEngine = canvasEngine;
       this.pathModel = pathModel;
       this.historyManager = historyManager;
-      this.babylonEngine = babylonEngine;
     }
     show() { this._render(); this.modal.classList.add('active'); }
     hide() { this.modal.classList.remove('active'); }
@@ -2531,11 +2530,6 @@
                 <div class="export-icon"><i class="fa-solid fa-file-code"></i></div>
                 <div class="export-title">Save JSON File</div>
                 <div class="export-desc">Save editable course design file</div>
-              </div>
-              <div class="export-card" id="btn-export-glb">
-                <div class="export-icon" style="color: var(--accent-blue);"><i class="fa-solid fa-cube"></i></div>
-                <div class="export-title">Export 3D Model (.glb)</div>
-                <div class="export-desc">Download 3D scene with obstacles & trajectory</div>
               </div>
               <div class="export-card" id="btn-modal-import-json">
                 <div class="export-icon" style="color: var(--accent-emerald);"><i class="fa-solid fa-folder-open"></i></div>
@@ -2573,33 +2567,6 @@
         link.href = url;
         link.click();
         URL.revokeObjectURL(url);
-      });
-
-      const exportGlbCard = this.modal.querySelector('#btn-export-glb');
-      exportGlbCard?.addEventListener('click', async () => {
-        if (!this.babylonEngine) {
-          alert('3D Engine is not available.');
-          return;
-        }
-        const titleEl = exportGlbCard.querySelector('.export-title');
-        const origTitle = titleEl ? titleEl.innerHTML : '';
-        try {
-          exportGlbCard.style.pointerEvents = 'none';
-          if (titleEl) titleEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Exporting .GLB...';
-          this.babylonEngine.updateScene(this.canvasEngine.field, this.canvasEngine.obstacles, this.pathModel);
-          await this.babylonEngine.exportGLB(`Agility_Course_3D_${Date.now()}`);
-          if (titleEl) titleEl.innerHTML = '<i class="fa-solid fa-check" style="color: var(--accent-emerald);"></i> Exported .GLB!';
-          setTimeout(() => {
-            if (titleEl) titleEl.innerHTML = origTitle;
-            exportGlbCard.style.pointerEvents = 'auto';
-            this.hide();
-          }, 1000);
-        } catch (err) {
-          console.error("GLB Export error:", err);
-          alert(`Failed to export GLB: ${err.message || err}`);
-          if (titleEl) titleEl.innerHTML = origTitle;
-          exportGlbCard.style.pointerEvents = 'auto';
-        }
       });
 
       const importCard = this.modal.querySelector('#btn-modal-import-json');
@@ -2640,12 +2607,17 @@
       this.canvasEngine = new CanvasEngine(this.canvasElement, this.field, this.pathModel, this.historyManager);
 
       this.babylonCanvas = document.getElementById('babylon-canvas');
-      this.babylonEngine = new BabylonEngine(this.babylonCanvas);
+      this.babylonEngine = new BabylonEngine(this.babylonCanvas, { mode: 'orbit' });
+
+      this.arucoBabylonCanvas = document.getElementById('aruco-babylon-canvas');
+      this.arucoBabylonEngine = new BabylonEngine(this.arucoBabylonCanvas, { mode: 'ar' });
+      this.showAr3DCourse = true;
+      window.agilityApp = this;
 
       this.toolbar = new Toolbar(document.getElementById('toolbar-palette'), this.canvasEngine, this.field, this.historyManager);
       this.propertyPanel = new PropertyPanel(document.getElementById('property-panel-container'), this.canvasEngine, this.historyManager);
       this.fieldModal = new FieldModal(document.getElementById('field-modal-container'), this.field, this.canvasEngine, this.historyManager);
-      this.exportModal = new ExportModal(document.getElementById('export-modal-container'), this.canvasEngine, this.pathModel, this.historyManager, this.babylonEngine);
+      this.exportModal = new ExportModal(document.getElementById('export-modal-container'), this.canvasEngine, this.pathModel, this.historyManager);
 
       this._bindHeaderActions();
       
@@ -2659,6 +2631,38 @@
       this.historyManager.clear();
       this.historyManager.push(this.canvasEngine.getSnapshot());
     }
+
+    onArMarkersDetected(detectedMarkers, imgWidth, imgHeight) {
+      if (!this.arucoBabylonEngine || !this.showAr3DCourse) return;
+
+      const idToKeyMap = window.arucoTracker ? window.arucoTracker.getIdToKeyMap() : {};
+      const res = this.arucoBabylonEngine.alignWithMarkers(
+        detectedMarkers,
+        this.field,
+        imgWidth || 1280,
+        imgHeight || 720,
+        idToKeyMap
+      );
+
+      const statusTextEl = document.getElementById('aruco-ar-status-text');
+      if (statusTextEl && res) {
+        if (res.status === 'locked') {
+          statusTextEl.innerHTML = `<i class="fa-solid fa-anchor" style="color: #f87171;"></i> 3D: Anchor Locked`;
+        } else if (res.status === 'multi') {
+          statusTextEl.innerHTML = `<i class="fa-solid fa-cube" style="color: #34d399;"></i> 3D: ${res.markerCount} Markers Aligned`;
+        } else if (res.status === 'single') {
+          const mKey = res.primaryKey || 'Single';
+          const def = window.arucoTracker?.markerDefinitions.find(d => d.key === mKey);
+          const name = def ? def.name : mKey;
+          statusTextEl.innerHTML = `<i class="fa-solid fa-cube" style="color: #38bdf8;"></i> 3D: Aligned (${name})`;
+        } else if (res.status === 'holding') {
+          statusTextEl.innerHTML = `<i class="fa-solid fa-clock" style="color: #fbbf24;"></i> 3D: Holding Anchor...`;
+        } else {
+          statusTextEl.innerHTML = `<i class="fa-solid fa-magnifying-glass" style="color: #94a3b8;"></i> 3D: Searching Marker...`;
+        }
+      }
+    }
+
     _bindHeaderActions() {
       const undoBtn = document.getElementById('btn-undo');
       const redoBtn = document.getElementById('btn-redo');
@@ -2715,9 +2719,10 @@
         view2D?.classList.remove('active');
         view3D?.classList.remove('active');
         appRoot?.classList.add('aruco-active');
-        if (window.arCourseEngine) {
-          window.arCourseEngine.updateCourse(this.field, this.canvasEngine.obstacles, this.pathModel);
-          window.arCourseEngine.resize();
+        // Synchronize AR 3D Course with current field, obstacles and path
+        if (this.arucoBabylonEngine) {
+          this.arucoBabylonEngine.updateScene(this.field, this.canvasEngine.obstacles, this.pathModel);
+          this.arucoBabylonEngine.resize();
         }
       };
 
@@ -2729,31 +2734,6 @@
         this.babylonEngine.resetCamera();
       });
 
-      const btnExport3DGlb = document.getElementById('btn-export-3d-glb');
-      btnExport3DGlb?.addEventListener('click', async () => {
-        if (!this.babylonEngine) return;
-        const origHtml = btnExport3DGlb.innerHTML;
-        try {
-          btnExport3DGlb.disabled = true;
-          btnExport3DGlb.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Exporting...';
-          
-          this.babylonEngine.updateScene(this.field, this.canvasEngine.obstacles, this.pathModel);
-          const filename = `Agility_Course_3D_${Date.now()}`;
-          await this.babylonEngine.exportGLB(filename);
-
-          btnExport3DGlb.innerHTML = '<i class="fa-solid fa-check"></i> Exported!';
-          setTimeout(() => {
-            btnExport3DGlb.innerHTML = origHtml;
-            btnExport3DGlb.disabled = false;
-          }, 2000);
-        } catch (err) {
-          console.error("Failed to export GLB:", err);
-          alert(`Export failed: ${err.message || err}`);
-          btnExport3DGlb.innerHTML = origHtml;
-          btnExport3DGlb.disabled = false;
-        }
-      });
-
       const groundOpacitySlider = document.getElementById('slider-3d-ground-opacity');
       const groundOpacityVal = document.getElementById('val-3d-ground-opacity');
       groundOpacitySlider?.addEventListener('input', e => {
@@ -2761,6 +2741,47 @@
         if (groundOpacityVal) groundOpacityVal.textContent = `${Math.round(val * 100)}%`;
         if (this.babylonEngine) {
           this.babylonEngine.setGroundOpacity(val);
+        }
+      });
+
+      // AR 3D Viewport Controls
+      const btnToggleAr3D = document.getElementById('btn-toggle-ar-3d');
+      btnToggleAr3D?.addEventListener('click', () => {
+        this.showAr3DCourse = !this.showAr3DCourse;
+        btnToggleAr3D.classList.toggle('active', this.showAr3DCourse);
+        if (this.arucoBabylonEngine) {
+          this.arucoBabylonEngine.setCourseVisible(this.showAr3DCourse);
+        }
+      });
+
+      const btnLockAnchor = document.getElementById('btn-ar-lock-anchor');
+      btnLockAnchor?.addEventListener('click', async () => {
+        if (!window.arucoPoseEstimator) return;
+        if (!window.arucoPoseEstimator.hasGyro) {
+          await window.arucoPoseEstimator.requestGyroPermission();
+        }
+        const isLocked = window.arucoPoseEstimator.toggleAnchorLock();
+        btnLockAnchor.classList.toggle('locked', isLocked);
+        btnLockAnchor.innerHTML = isLocked
+          ? '<i class="fa-solid fa-lock"></i> Anchor Locked'
+          : '<i class="fa-solid fa-anchor"></i> Lock Anchor';
+        btnLockAnchor.title = isLocked
+          ? 'Anchor locked! You can now walk around the field without losing 3D alignment'
+          : 'Lock 3D Course Anchor to walk around the field without marker in view';
+
+        const statusTextEl = document.getElementById('aruco-ar-status-text');
+        if (statusTextEl && isLocked) {
+          statusTextEl.innerHTML = '<i class="fa-solid fa-anchor" style="color: #f87171;"></i> 3D: Anchor Locked';
+        }
+      });
+
+      const arGroundSlider = document.getElementById('slider-ar-ground-opacity');
+      const arGroundVal = document.getElementById('val-ar-ground-opacity');
+      arGroundSlider?.addEventListener('input', e => {
+        const val = parseFloat(e.target.value);
+        if (arGroundVal) arGroundVal.textContent = `${Math.round(val * 100)}%`;
+        if (this.arucoBabylonEngine) {
+          this.arucoBabylonEngine.setGroundOpacity(val);
         }
       });
 
@@ -2774,7 +2795,6 @@
         setTimeout(() => {
           this.canvasEngine.resizeCanvas();
           if (this.babylonEngine) this.babylonEngine.resize();
-          if (window.arCourseEngine) window.arCourseEngine.resize();
         }, 260);
       };
 

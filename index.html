@@ -65,7 +65,7 @@
         <div class="brand-logo">
           <i class="fa-solid fa-dog"></i>
         </div>
-        <div class="brand-title">Agility Course Designer 1.1.7</div>
+        <div class="brand-title">Agility Course Designer 1.1.3</div>
       </div>
 
       <!-- 2D / 3D / ArUco View Mode Tab Switcher -->
@@ -176,9 +176,6 @@
               <button id="btn-reset-3d-cam" class="hud-btn" title="Reset Camera View">
                 <i class="fa-solid fa-camera-rotate"></i> Reset Cam
               </button>
-              <button id="btn-export-3d-glb" class="hud-btn hud-btn-export" title="Export 3D Model to .GLB format">
-                <i class="fa-solid fa-file-arrow-down"></i> Export .GLB
-              </button>
             </div>
           </div>
         </div>
@@ -193,10 +190,12 @@
               <!-- Hidden Video element receiving stream -->
               <video id="webcam" playsinline muted autoplay style="display: none;"></video>
               
-              <!-- OpenCV Output Canvas & Transparent Babylon.js AR Canvas Overlay -->
+              <!-- OpenCV Output Canvas & 3D AR Babylon Canvas Overlay -->
               <div class="aruco-canvas-wrapper">
-                <canvas id="outputCanvas"></canvas>
-                <canvas id="arBabylonCanvas"></canvas>
+                <div id="aruco-canvas-stage" class="aruco-canvas-stage">
+                  <canvas id="outputCanvas"></canvas>
+                  <canvas id="aruco-babylon-canvas"></canvas>
+                </div>
               </div>
 
               <!-- Camera Placeholder state -->
@@ -205,16 +204,14 @@
                   <i class="fa-solid fa-video"></i>
                 </div>
                 <div class="aruco-placeholder-text">Camera Feed Inactive</div>
-                <div class="aruco-placeholder-sub">Click <strong>Start Camera</strong> below to begin real-time 4x4 ArUco field marker tracking and AR course walkthrough.</div>
+                <div class="aruco-placeholder-sub">Click <strong>Start Camera</strong> below to begin real-time 4x4 ArUco field marker tracking and 3D course alignment.</div>
               </div>
 
               <!-- Top Left Camera Meta Overlay -->
               <div class="aruco-camera-meta-overlay">
                 <div class="aruco-meta-pill">OpenCV: <strong id="aruco-cv-ver">4.x (WebAssembly)</strong></div>
                 <div class="aruco-meta-pill">Performance: <strong id="aruco-fps-val">-- FPS</strong></div>
-                <div id="ar-tracking-badge" class="aruco-status-badge loading" style="display: none;">
-                  <span class="aruco-status-dot"></span> Searching Markers...
-                </div>
+                <div class="aruco-meta-pill aruco-ar-pill"><i class="fa-solid fa-cube" style="color: #38bdf8;"></i> <strong id="aruco-ar-status-text">3D: Searching Marker</strong></div>
               </div>
 
               <!-- Floating Camera HUD Controls -->
@@ -232,16 +229,26 @@
                   <i class="fa-solid fa-camera-rotate"></i> Flip Cam
                 </button>
 
-                <button id="btn-toggle-ar" class="aruco-hud-btn aruco-btn-ar" title="Toggle Augmented Reality 3D Course Walkthrough">
-                  <i class="fa-solid fa-vr-cardboard"></i> AR Walkthrough: <strong id="ar-toggle-label">OFF</strong>
-                </button>
-
                 <button id="startBtn" class="aruco-hud-btn aruco-btn-start" disabled title="Start camera stream & marker tracking">
                   <i class="fa-solid fa-play"></i> Start Camera
                 </button>
                 <button id="stopBtn" class="aruco-hud-btn aruco-btn-stop" disabled title="Stop camera stream">
                   <i class="fa-solid fa-stop"></i> Stop
                 </button>
+
+                <div class="aruco-hud-divider"></div>
+
+                <!-- 3D AR Course Overlay Controls -->
+                <button id="btn-toggle-ar-3d" class="aruco-hud-btn sec-btn active" title="Toggle 3D Agility Course Overlay">
+                  <i class="fa-solid fa-cube"></i> 3D Course
+                </button>
+                <button id="btn-ar-lock-anchor" class="aruco-hud-btn sec-btn" title="Lock 3D Course Anchor to walk around the field without marker in view">
+                  <i class="fa-solid fa-anchor"></i> Lock Anchor
+                </button>
+                <div class="aruco-ground-slider-wrap" title="Adjust AR Ground Transparency">
+                  <span class="aruco-slider-label"><i class="fa-solid fa-eye"></i> Ground: <strong id="val-ar-ground-opacity">15%</strong></span>
+                  <input type="range" id="slider-ar-ground-opacity" min="0" max="1" step="0.05" value="0.15" class="app-range" style="width: 60px; height: 5px;">
+                </div>
               </div>
 
             </div>
@@ -255,7 +262,7 @@
                   <i class="fa-solid fa-bullseye"></i> Field Marker Tracker
                 </div>
                 <div class="aruco-header-actions">
-                  <button id="btn-aruco-settings" class="aruco-icon-btn" title="Configure Marker IDs & Physical Size">
+                  <button id="btn-aruco-settings" class="aruco-icon-btn" title="Configure Marker IDs">
                     <i class="fa-solid fa-gear"></i>
                   </button>
                 </div>
@@ -264,39 +271,6 @@
               <!-- Sidebar Body -->
               <div class="aruco-sidebar-body">
                 
-                <!-- AR Course Walkthrough Controls Card -->
-                <div id="ar-controls-card" class="aruco-ar-card">
-                  <div class="aruco-section-title">
-                    <span><i class="fa-solid fa-vr-cardboard" style="color: #38bdf8;"></i> AR Walkthrough Settings</span>
-                    <span id="ar-active-pill" style="font-size: 10px; color: var(--text-dim);">Disabled</span>
-                  </div>
-                  
-                  <div style="display: flex; flex-direction: column; gap: 8px;">
-                    <div style="display: flex; align-items: center; justify-content: space-between;">
-                      <span style="font-size: 12px; color: var(--text-muted);">AR Turf Opacity:</span>
-                      <span id="val-ar-ground-opacity" style="font-size: 11px; font-weight: 700; color: var(--text-main);">0% (Grass)</span>
-                    </div>
-                    <input type="range" id="slider-ar-ground-opacity" min="0" max="0.5" step="0.05" value="0.0" class="app-range" style="width: 100%; height: 5px;">
-
-                    <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 4px;">
-                      <span style="font-size: 12px; color: var(--text-muted);">Marker Print Size:</span>
-                      <div style="display: flex; align-items: center; gap: 4px;">
-                        <input type="number" id="input-ar-marker-size" min="5" max="100" step="1" value="20" class="app-input" style="width: 55px; padding: 3px 6px; font-size: 12px; text-align: center;">
-                        <span style="font-size: 11px; color: var(--text-dim);">cm</span>
-                      </div>
-                    </div>
-
-                    <div style="display: flex; gap: 8px; margin-top: 4px;">
-                      <button id="btn-toggle-ar-traj" class="sec-btn active" style="flex: 1; font-size: 11px; padding: 4px 6px;" title="Toggle 3D Trajectory in AR">
-                        <i class="fa-solid fa-bezier-curve"></i> Trajectory
-                      </button>
-                      <button id="btn-toggle-ar-nums" class="sec-btn active" style="flex: 1; font-size: 11px; padding: 4px 6px;" title="Toggle 3D Sequence Numbers in AR">
-                        <i class="fa-solid fa-hashtag"></i> Numbers
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
                 <!-- Field Acquisition Metrics Card -->
                 <div class="aruco-metrics-card">
                   <div class="aruco-metrics-header">
@@ -372,10 +346,27 @@
     <div id="aruco-settings-modal" class="aruco-settings-modal">
       <div class="aruco-modal-header">
         <div class="aruco-modal-title">
-          <i class="fa-solid fa-sliders" style="color: var(--accent-blue);"></i> Configure Field Marker IDs & Calibration
+          <i class="fa-solid fa-sliders" style="color: var(--accent-blue);"></i> Configure Field Markers & Calibration
         </div>
       </div>
       <div class="aruco-modal-body">
+        <div class="aruco-settings-group" style="padding-bottom: 12px; border-bottom: 1px solid var(--panel-border); margin-bottom: 8px;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+            <div>
+              <label style="font-size: 13px; font-weight: 600; color: var(--text-main); display: block;">
+                <i class="fa-solid fa-ruler-combined" style="color: var(--accent-blue);"></i> Physical Marker Size
+              </label>
+              <span style="font-size: 11px; color: var(--text-dim); display: block; margin-top: 2px;">
+                Printed square edge length in meters (e.g. 0.25 = 25 cm, 0.40 = 40 cm for cones)
+              </span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <input type="number" step="0.01" min="0.05" max="2.0" class="app-input" id="input-aruco-marker-size" value="0.25" style="width: 75px; text-align: center;">
+              <span style="font-size: 12px; color: var(--text-muted); font-weight: 600;">m</span>
+            </div>
+          </div>
+        </div>
+
         <div style="font-size: 12px; color: var(--text-dim); line-height: 1.4;">
           Set the specific 4x4 ArUco marker ID (0 to 49) assigned to each of the 8 field boundary locations:
         </div>
@@ -390,10 +381,9 @@
   </div>
 
   <!-- Standalone Application Scripts -->
-  <script src="js/course3DBuilder.js"></script>
-  <script src="js/arCourseEngine.js"></script>
   <script src="js/arucoTrackerUI.js"></script>
   <script src="js/arucoDetector.js"></script>
+  <script src="js/arucoPose.js"></script>
   <script src="js/babylonView.js"></script>
   <script src="js/app.js"></script>
 </body>
