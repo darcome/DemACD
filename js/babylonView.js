@@ -97,11 +97,23 @@ class BabylonEngine {
 
         // Orbit ArcRotateCamera centered at origin
         this.camera = new BABYLON.ArcRotateCamera("camera3d", -Math.PI / 2, Math.PI / 3, 40, BABYLON.Vector3.Zero(), this.scene);
-        this.camera.attachControl(this.canvas, true);
+        
+        // CRITICAL: noPreventDefault must be false so iOS Safari does NOT cancel touch events with pointercancel!
+        this.camera.attachControl(this.canvas, false);
         this.camera.lowerRadiusLimit = 4;
         this.camera.upperRadiusLimit = 150;
         this.camera.wheelPrecision = 15;
+        this.camera.pinchPrecision = 12;
         this.camera.panningSensibility = 50;
+        this.camera.angularSensibilityX = 1000;
+        this.camera.angularSensibilityY = 1000;
+        this.camera.upperBetaLimit = Math.PI / 2 - 0.05; // Prevent camera from dipping under ground
+        this.touchMode = 'orbit'; // 'orbit' or 'pan'
+
+        // Enforce touch-action none on canvas
+        if (this.canvas) {
+          this.canvas.style.touchAction = 'none';
+        }
 
         // Hemispheric Ambient Light
         const hemiLight = new BABYLON.HemisphericLight("hemiLight", new BABYLON.Vector3(0, 1, 0), this.scene);
@@ -131,7 +143,7 @@ class BabylonEngine {
       });
 
       window.addEventListener('resize', () => {
-        if (this.engine) this.engine.resize();
+        this.resize();
       });
 
       this.isInitialized = true;
@@ -141,7 +153,39 @@ class BabylonEngine {
   }
 
   resize() {
-    if (this.engine) this.engine.resize();
+    if (this.engine) {
+      this.engine.resize();
+      if (this.scene) {
+        this.scene.render();
+      }
+    }
+  }
+
+  setTouchMode(mode) {
+    if (!this.camera || this.mode === 'ar') return;
+    this.touchMode = mode; // 'orbit' or 'pan'
+    const pointersInput = this.camera.inputs && this.camera.inputs.attached && this.camera.inputs.attached.pointers;
+    if (pointersInput) {
+      if (mode === 'pan') {
+        // Map primary 1-finger pointer to camera panning
+        pointersInput.buttons = [2, 0, 1];
+      } else {
+        // Default: 1-finger orbits
+        pointersInput.buttons = [0, 1, 2];
+      }
+    }
+  }
+
+  setTopDownView() {
+    if (!this.camera || this.mode === 'ar') return;
+    this.camera.target = new BABYLON.Vector3(0, 0, 0);
+    this.camera.alpha = -Math.PI / 2;
+    this.camera.beta = 0.001; // Straight down
+    if (this.currentField) {
+      const maxDim = Math.max(this.currentField.widthMeters, this.currentField.lengthMeters);
+      this.camera.radius = maxDim * 1.35;
+    }
+    if (this.scene) this.scene.render();
   }
 
   resetCamera() {
@@ -151,6 +195,7 @@ class BabylonEngine {
     this.camera.beta = Math.PI / 3.2;
     const maxDim = Math.max(this.currentField.widthMeters, this.currentField.lengthMeters);
     this.camera.radius = maxDim * 1.15;
+    if (this.scene) this.scene.render();
   }
 
   // --- AR POSE & ALIGNMENT METHODS ---

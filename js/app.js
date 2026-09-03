@@ -2664,6 +2664,15 @@
     }
 
     _bindHeaderActions() {
+      // Dynamic Viewport Height (--dvh) fix for iOS Safari & mobile browsers
+      const updateViewportHeight = () => {
+        const dvh = window.innerHeight * 0.01;
+        document.documentElement.style.setProperty('--dvh', `${dvh}px`);
+      };
+      window.addEventListener('resize', updateViewportHeight);
+      window.addEventListener('orientationchange', updateViewportHeight);
+      updateViewportHeight();
+
       const undoBtn = document.getElementById('btn-undo');
       const redoBtn = document.getElementById('btn-redo');
       this.historyManager.setOnChange(({ canUndo, canRedo }) => {
@@ -2709,6 +2718,13 @@
         viewAruco?.classList.remove('active');
         appRoot?.classList.remove('aruco-active');
         this.babylonEngine.updateScene(this.field, this.canvasEngine.obstacles, this.pathModel);
+        // CRITICAL: Resize Babylon engine immediately upon becoming visible!
+        if (this.babylonEngine) {
+          this.babylonEngine.resize();
+          requestAnimationFrame(() => {
+            this.babylonEngine.resize();
+          });
+        }
       };
 
       const switchToAruco = () => {
@@ -2723,12 +2739,35 @@
         if (this.arucoBabylonEngine) {
           this.arucoBabylonEngine.updateScene(this.field, this.canvasEngine.obstacles, this.pathModel);
           this.arucoBabylonEngine.resize();
+          requestAnimationFrame(() => {
+            this.arucoBabylonEngine.resize();
+          });
         }
       };
 
       tab2D?.addEventListener('click', switchTo2D);
       tab3D?.addEventListener('click', switchTo3D);
       tabAruco?.addEventListener('click', switchToAruco);
+
+      // 3D View Controls (Touch Mode, Top-Down, Reset Cam, Opacity)
+      const btn3DTouchMode = document.getElementById('btn-3d-touch-mode');
+      const lbl3DTouchMode = document.getElementById('lbl-3d-touch-mode');
+      let current3DTouchMode = 'orbit';
+
+      btn3DTouchMode?.addEventListener('click', () => {
+        current3DTouchMode = current3DTouchMode === 'orbit' ? 'pan' : 'orbit';
+        if (lbl3DTouchMode) lbl3DTouchMode.textContent = current3DTouchMode === 'orbit' ? 'Orbit' : 'Pan';
+        btn3DTouchMode.classList.toggle('active', current3DTouchMode === 'orbit');
+        if (this.babylonEngine) {
+          this.babylonEngine.setTouchMode(current3DTouchMode);
+        }
+      });
+
+      document.getElementById('btn-3d-topdown')?.addEventListener('click', () => {
+        if (this.babylonEngine) {
+          this.babylonEngine.setTopDownView();
+        }
+      });
 
       document.getElementById('btn-reset-3d-cam')?.addEventListener('click', () => {
         this.babylonEngine.resetCamera();
@@ -2742,6 +2781,13 @@
         if (this.babylonEngine) {
           this.babylonEngine.setGroundOpacity(val);
         }
+      });
+
+      // Mobile ArUco Sidebar Drawer Toggle
+      const btnArucoToggleSidebar = document.getElementById('btn-aruco-toggle-sidebar');
+      const arucoSidebar = document.querySelector('.aruco-ui-sidebar');
+      btnArucoToggleSidebar?.addEventListener('click', () => {
+        arucoSidebar?.classList.toggle('open');
       });
 
       // AR 3D Viewport Controls
@@ -2790,6 +2836,42 @@
       const rightSidebar = document.getElementById('property-panel-container');
       const btnToggleLeft = document.getElementById('btn-toggle-left-sidebar');
       const btnToggleRight = document.getElementById('btn-toggle-right-sidebar');
+      const sidebarBackdrop = document.getElementById('sidebar-backdrop');
+
+      const updateSidebarBackdrop = () => {
+        const isMobile = window.innerWidth <= 900;
+        const anyOpen = isMobile && (!leftSidebar?.classList.contains('collapsed') || !rightSidebar?.classList.contains('collapsed'));
+        sidebarBackdrop?.classList.toggle('active', !!anyOpen);
+      };
+
+      sidebarBackdrop?.addEventListener('click', () => {
+        leftSidebar?.classList.add('collapsed');
+        rightSidebar?.classList.add('collapsed');
+        if (btnToggleLeft) {
+          btnToggleLeft.innerHTML = '<i class="fa-solid fa-chevron-right"></i>';
+          btnToggleLeft.title = 'Expand Equipment Palette';
+        }
+        if (btnToggleRight) {
+          btnToggleRight.innerHTML = '<i class="fa-solid fa-chevron-left"></i>';
+          btnToggleRight.title = 'Expand Property Inspector';
+        }
+        updateSidebarBackdrop();
+        triggerCanvasResize();
+      });
+
+      // Auto-collapse sidebars on initial load if mobile/portrait
+      if (window.innerWidth <= 900) {
+        leftSidebar?.classList.add('collapsed');
+        rightSidebar?.classList.add('collapsed');
+        if (btnToggleLeft) {
+          btnToggleLeft.innerHTML = '<i class="fa-solid fa-chevron-right"></i>';
+          btnToggleLeft.title = 'Expand Equipment Palette';
+        }
+        if (btnToggleRight) {
+          btnToggleRight.innerHTML = '<i class="fa-solid fa-chevron-left"></i>';
+          btnToggleRight.title = 'Expand Property Inspector';
+        }
+      }
 
       const triggerCanvasResize = () => {
         setTimeout(() => {
@@ -2804,6 +2886,7 @@
           btnToggleLeft.innerHTML = isCollapsed ? '<i class="fa-solid fa-chevron-right"></i>' : '<i class="fa-solid fa-chevron-left"></i>';
           btnToggleLeft.title = isCollapsed ? 'Expand Equipment Palette' : 'Collapse Equipment Palette';
         }
+        updateSidebarBackdrop();
         triggerCanvasResize();
       });
 
@@ -2813,6 +2896,7 @@
           btnToggleRight.innerHTML = isCollapsed ? '<i class="fa-solid fa-chevron-left"></i>' : '<i class="fa-solid fa-chevron-right"></i>';
           btnToggleRight.title = isCollapsed ? 'Expand Property Inspector' : 'Collapse Property Inspector';
         }
+        updateSidebarBackdrop();
         triggerCanvasResize();
       });
       document.getElementById('btn-clear')?.addEventListener('click', () => {
