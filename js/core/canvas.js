@@ -34,6 +34,11 @@ export class CanvasEngine {
     this.isTransforming = false;
     this.transformType = null; // 'move', 'rotate', 'scale'
 
+    // Multi-Touch Gesture State
+    this.touchPinchDist = 0;
+    this.touchPinchCenter = { x: 0, y: 0 };
+    this.isTouchPinching = false;
+
     // Callbacks
     this.onSelectionChange = null;
     this.onObstacleChange = null;
@@ -353,10 +358,11 @@ export class CanvasEngine {
     window.addEventListener('mouseup', e => this._onMouseUp(e));
     this.canvas.addEventListener('wheel', e => this._onWheel(e), { passive: false });
 
-    // Touch support
+    // Touch support (with passive: false to allow e.preventDefault)
     this.canvas.addEventListener('touchstart', e => this._onTouchStart(e), { passive: false });
     this.canvas.addEventListener('touchmove', e => this._onTouchMove(e), { passive: false });
-    this.canvas.addEventListener('touchend', e => this._onTouchEnd(e));
+    this.canvas.addEventListener('touchend', e => this._onTouchEnd(e), { passive: false });
+    this.canvas.addEventListener('touchcancel', e => this._onTouchEnd(e), { passive: false });
   }
 
   _onMouseDown(e) {
@@ -466,21 +472,86 @@ export class CanvasEngine {
   }
 
   _onTouchStart(e) {
+    if (e.cancelable) e.preventDefault();
     if (e.touches.length === 1) {
+      this.isTouchPinching = false;
       const touch = e.touches[0];
       this._onMouseDown({ clientX: touch.clientX, clientY: touch.clientY, button: 0 });
+    } else if (e.touches.length === 2) {
+      // 2 fingers: pinch-to-zoom & two-finger pan
+      this.isTouchPinching = true;
+      if (this.isDragging) {
+        this.isDragging = false;
+      }
+      const t1 = e.touches[0];
+      const t2 = e.touches[1];
+      const dx = t2.clientX - t1.clientX;
+      const dy = t2.clientY - t1.clientY;
+      this.touchPinchDist = Math.hypot(dx, dy);
+      this.touchPinchCenter = {
+        x: (t1.clientX + t2.clientX) / 2,
+        y: (t1.clientY + t2.clientY) / 2
+      };
     }
   }
 
   _onTouchMove(e) {
-    if (e.touches.length === 1) {
+    if (e.cancelable) e.preventDefault();
+    if (e.touches.length === 1 && !this.isTouchPinching) {
       const touch = e.touches[0];
       this._onMouseMove({ clientX: touch.clientX, clientY: touch.clientY });
+    } else if (e.touches.length === 2) {
+      const t1 = e.touches[0];
+      const t2 = e.touches[1];
+      const dx = t2.clientX - t1.clientX;
+      const dy = t2.clientY - t1.clientY;
+      const newDist = Math.hypot(dx, dy);
+      const newCenter = {
+        x: (t1.clientX + t2.clientX) / 2,
+        y: (t1.clientY + t2.clientY) / 2
+      };
+
+      if (this.touchPinchDist > 0) {
+        // Two finger pan
+        const panDx = newCenter.x - this.touchPinchCenter.x;
+        const panDy = newCenter.y - this.touchPinchCenter.y;
+        this.panX += panDx;
+        this.panY += panDy;
+
+        // Two finger pinch zoom
+        const scaleChange = newDist / this.touchPinchDist;
+        if (Math.abs(scaleChange - 1) > 0.005) {
+          const newZoom = Math.min(Math.max(0.3, this.zoom * scaleChange), 4.0);
+          const rect = this.canvas.getBoundingClientRect();
+          const mouseX = newCenter.x - rect.left;
+          const mouseY = newCenter.y - rect.top;
+
+          this.panX = mouseX - (mouseX - this.panX) * (newZoom / this.zoom);
+          this.panY = mouseY - (mouseY - this.panY) * (newZoom / this.zoom);
+          this.zoom = newZoom;
+        }
+
+        this.render();
+      }
+
+      this.touchPinchDist = newDist;
+      this.touchPinchCenter = newCenter;
     }
   }
 
-  _onTouchEnd() {
-    this._onMouseUp({});
+  _onTouchEnd(e) {
+    if (e.cancelable) e.preventDefault();
+    if (e.touches.length === 0) {
+      this.isTouchPinching = false;
+      this.touchPinchDist = 0;
+      this._onMouseUp({});
+    } else if (e.touches.length === 1) {
+      // Transition from pinch to single touch without jumping
+      this.isTouchPinching = false;
+      this.touchPinchDist = 0;
+      this.isDragging = false;
+      this.isPanning = false;
+    }
   }
 }
 

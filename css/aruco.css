@@ -166,19 +166,23 @@
 /* Floating Camera HUD Overlay */
 .aruco-camera-hud {
   position: absolute;
-  bottom: 20px;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
   left: 50%;
   transform: translateX(-50%);
   display: flex;
   align-items: center;
-  gap: 12px;
-  background: rgba(15, 23, 42, 0.85);
+  justify-content: center;
+  gap: 10px;
+  background: rgba(15, 23, 42, 0.88);
   backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   border: 1px solid rgba(255, 255, 255, 0.15);
-  padding: 8px 16px;
+  padding: 8px 14px;
   border-radius: var(--radius-xl);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
   z-index: 40;
+  max-width: calc(100% - 24px);
+  box-sizing: border-box;
 }
 
 .aruco-status-badge {
@@ -424,7 +428,8 @@
 
 /* Scrollable Content inside 25% Sidebar */
 .aruco-sidebar-body {
-  flex: 1;
+  flex: 1 1 0;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 14px;
@@ -759,7 +764,7 @@
 
 /* Sidebar Footer / Action Bar */
 .aruco-sidebar-footer {
-  padding: 12px 14px;
+  padding: 12px 14px calc(14px + env(safe-area-inset-bottom, 0px)) 14px;
   border-top: 1px solid var(--panel-border);
   background: rgba(15, 23, 42, 0.5);
   display: flex;
@@ -770,6 +775,39 @@
   flex: 1;
   font-size: 12px;
   padding: 6px 10px;
+}
+
+/* Mobile Sidebar Drawer Toggle Button */
+.aruco-mobile-sidebar-toggle {
+  display: none;
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 45;
+  background: rgba(15, 23, 42, 0.88);
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  color: #ffffff;
+  padding: 8px 14px;
+  border-radius: var(--radius-lg);
+  font-size: 12px;
+  font-weight: 700;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  transition: all 0.2s ease;
+}
+
+.aruco-mobile-sidebar-toggle:hover {
+  background: rgba(15, 23, 42, 0.95);
+  border-color: var(--accent-blue);
+  transform: translateY(-1px);
+}
+
+.aruco-mobile-sidebar-toggle i {
+  color: var(--accent-emerald);
 }
 
 /* Settings Modal for ArUco Marker ID Mapping */
@@ -842,19 +880,61 @@
   display: block;
 }
 
-/* Responsive adjustments */
-@media (max-width: 1024px) {
-  .aruco-workspace-layout {
-    flex-direction: column;
-  }
-  .aruco-camera-viewport {
-    flex: 0 0 60%;
-    width: 100%;
-    border-right: none;
-    border-bottom: 1px solid var(--panel-border);
-  }
-  .aruco-ui-sidebar {
-    flex: 0 0 40%;
-    width: 100%;
+/* Responsive adjustments for ArUco */
+@media (max-width: 1200px) {
+  .aruco-camera-hud {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 6px 12px;
   }
 }
+
+@media (max-width: 900px) {
+  .aruco-workspace-layout {
+    position: relative;
+  }
+  .aruco-mobile-sidebar-toggle {
+    display: inline-flex;
+  }
+  .aruco-camera-viewport {
+    flex: 1 1 100%;
+    width: 100%;
+    height: 100%;
+    border-right: none;
+  }
+  .aruco-ui-sidebar {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 320px;
+    max-width: 88vw;
+    height: 100%;
+    z-index: 60;
+    box-shadow: -6px 0 25px rgba(0, 0, 0, 0.8);
+    transform: translateX(100%);
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .aruco-ui-sidebar.open {
+    transform: translateX(0);
+  }
+  .aruco-camera-hud {
+    max-width: 96vw;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 10px;
+  }
+  .aruco-hud-btn {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+  .aruco-select-device {
+    max-width: 130px;
+    font-size: 11px;
+    padding: 4px 6px;
+  }
+  .aruco-ground-slider-wrap {
+    padding: 3px 8px;
+  }
+}
+

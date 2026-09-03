@@ -5,18 +5,20 @@
   height: 100%;
   display: block;
   cursor: crosshair;
+  touch-action: none;
 }
 
 /* Floating HUD Viewport Controls */
 .canvas-hud {
   position: absolute;
-  bottom: 20px;
-  right: 20px;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  right: calc(16px + env(safe-area-inset-right, 0px));
   display: flex;
   align-items: center;
   gap: 8px;
   background: var(--glass-bg);
   backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--glass-border);
   padding: 6px 12px;
   border-radius: var(--radius-xl);
@@ -123,6 +125,7 @@
   width: 100%;
   height: 100%;
   display: none;
+  touch-action: none;
 }
 
 .workspace-view.active {
@@ -137,43 +140,46 @@
   touch-action: none;
 }
 
-.hud-controls {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 .hud-btn {
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.15);
   color: var(--text-main);
   font-size: 12px;
   font-weight: 600;
-  padding: 4px 10px;
+  padding: 5px 10px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 6px;
   transition: all 0.2s ease;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .hud-btn:hover {
   background: var(--accent-blue);
   border-color: var(--accent-blue);
+  color: #ffffff;
 }
 
-.hud-btn.hud-btn-export {
-  background: rgba(14, 165, 233, 0.18);
-  border-color: rgba(56, 189, 248, 0.45);
-  color: #38bdf8;
-}
-
-.hud-btn.hud-btn-export:hover {
+.hud-btn.active {
   background: var(--accent-blue);
   border-color: var(--accent-blue);
   color: #ffffff;
-  box-shadow: 0 0 14px rgba(56, 189, 248, 0.4);
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.4);
+}
+
+@media (max-width: 768px) {
+  .canvas-hud {
+    padding: 4px 8px;
+    gap: 6px;
+    max-width: 94vw;
+    flex-wrap: wrap;
+  }
+  .hud-info {
+    display: none;
+  }
 }
 
 /* Sidebar Floating Edge Collapse Buttons */

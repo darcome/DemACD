@@ -468,6 +468,9 @@ class ArUcoTrackerUI {
 
     const barEl = document.getElementById('aruco-progress-bar');
     if (barEl) barEl.style.width = `${pct}%`;
+
+    const mobileBadgeEl = document.getElementById('aruco-mobile-badge-text');
+    if (mobileBadgeEl) mobileBadgeEl.textContent = `Markers (${seenCount}/${totalCount})`;
   }
 
   renderMarkerCards() {
