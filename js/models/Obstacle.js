@@ -28,6 +28,8 @@ export class Obstacle {
     
     // Tunnel bending parameters
     this.curve = options.curve || 0;
+    this.badgeAngleDeg = options.badgeAngleDeg !== undefined ? options.badgeAngleDeg : -135;
+    this.badgeAngles = (options.badgeAngles && typeof options.badgeAngles === 'object') ? { ...options.badgeAngles } : {};
 
     const isTunnelType = type === OBSTACLE_TYPES.TUNNEL || (typeof type === 'string' && type.startsWith('tunnel'));
     if (options.tunnelNodes && Array.isArray(options.tunnelNodes) && options.tunnelNodes.length === 3) {
@@ -280,6 +282,93 @@ export class Obstacle {
     return this.getSeqArray().includes(num);
   }
 
+  getBadgeAngle(seq) {
+    if (this.badgeAngles && seq !== undefined && seq !== null && this.badgeAngles[seq] !== undefined) {
+      return this.badgeAngles[seq];
+    }
+    const seqs = this.getSeqArray();
+    const sNum = Number(seq);
+    const idx = seqs.indexOf(sNum);
+    const baseAngle = this.badgeAngleDeg !== undefined ? this.badgeAngleDeg : -135;
+    if (idx <= 0) {
+      return baseAngle;
+    }
+    // Distribute unpositioned badges evenly around orbital ellipse
+    const step = 360 / Math.max(seqs.length, 2);
+    let angle = Math.round(baseAngle + idx * step);
+    while (angle > 180) angle -= 360;
+    while (angle <= -180) angle += 360;
+    return angle;
+  }
+
+  setBadgeAngle(seq, angleDeg) {
+    if (!this.badgeAngles) this.badgeAngles = {};
+    if (seq !== undefined && seq !== null) {
+      this.badgeAngles[seq] = angleDeg;
+    }
+    const seqs = this.getSeqArray();
+    if (seqs.length === 0 || seq === undefined || seq === null || seq === seqs[0] || seq == seqs[0]) {
+      this.badgeAngleDeg = angleDeg;
+    }
+  }
+
+  cleanBadgeAngles() {
+    if (!this.badgeAngles) {
+      this.badgeAngles = {};
+      return;
+    }
+    const validSeqs = new Set(this.getSeqArray().map(n => n.toString()));
+    Object.keys(this.badgeAngles).forEach(key => {
+      if (!validSeqs.has(key)) {
+        delete this.badgeAngles[key];
+      }
+    });
+  }
+
+  getBadgeWorldPosition(seq) {
+    const rx = Math.max(this.widthMeters / 2 + 0.8, 1.4);
+    const ry = Math.max(this.depthMeters / 2 + 0.8, 1.4);
+    const angleDeg = this.getBadgeAngle(seq);
+    const badgeRad = (angleDeg * Math.PI) / 180;
+
+    const localX = rx * Math.cos(badgeRad);
+    const localY = ry * Math.sin(badgeRad);
+
+    const rotRad = (this.rotation * Math.PI) / 180;
+    const cosR = Math.cos(rotRad);
+    const sinR = Math.sin(rotRad);
+
+    return {
+      x: this.x + (localX * cosR - localY * sinR),
+      y: this.y + (localX * sinR + localY * cosR)
+    };
+  }
+
+  getAllBadgeWorldPositions() {
+    return this.getSeqArray().map(seq => ({
+      seq,
+      ...this.getBadgeWorldPosition(seq),
+      angleDeg: this.getBadgeAngle(seq)
+    }));
+  }
+
+  getBadgeAngleFromWorldPosition(worldX, worldY) {
+    const rx = Math.max(this.widthMeters / 2 + 0.8, 1.4);
+    const ry = Math.max(this.depthMeters / 2 + 0.8, 1.4);
+    const rotRad = (-this.rotation * Math.PI) / 180;
+    const cosR = Math.cos(rotRad);
+    const sinR = Math.sin(rotRad);
+
+    const dx = worldX - this.x;
+    const dy = worldY - this.y;
+
+    const unrotX = dx * cosR - dy * sinR;
+    const unrotY = dx * sinR + dy * cosR;
+
+    const rad = Math.atan2(unrotY / ry, unrotX / rx);
+    return Math.round((rad * 180) / Math.PI);
+  }
+
   /**
    * Calculate dog approach takeoff point and landing point based on obstacle orientation & wrap direction
    */
@@ -363,7 +452,10 @@ export class Obstacle {
       depthMeters: this.depthMeters,
       seq: this.seq,
       wrap: this.wrap,
-      curve: this.curve
+      curve: this.curve,
+      badgeAngleDeg: this.badgeAngleDeg,
+      badgeAngles: this.badgeAngles,
+      tunnelNodes: this.tunnelNodes ? this.tunnelNodes.map(n => ({ x: n.x, y: n.y })) : undefined
     };
   }
 
@@ -375,7 +467,10 @@ export class Obstacle {
       depthMeters: json.depthMeters,
       seq: json.seq,
       wrap: json.wrap,
-      curve: json.curve
+      curve: json.curve,
+      badgeAngleDeg: json.badgeAngleDeg,
+      badgeAngles: json.badgeAngles,
+      tunnelNodes: json.tunnelNodes
     });
   }
 }

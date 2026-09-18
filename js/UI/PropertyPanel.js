@@ -16,6 +16,14 @@ export class PropertyPanel {
       this.render();
     };
 
+    const prevObsChange = this.canvasEngine.onObstacleChange;
+    this.canvasEngine.onObstacleChange = obs => {
+      if (typeof prevObsChange === 'function') prevObsChange(obs);
+      if (this.selectedObstacle === obs) {
+        this._updateBadgeAnglesDisplay();
+      }
+    };
+
     this.render();
   }
 
@@ -51,6 +59,24 @@ export class PropertyPanel {
           <input type="text" id="prop-seq" value="${typeof obs.getSeqString === 'function' ? obs.getSeqString() : (obs.seq !== null ? obs.seq : '')}" placeholder="e.g. 1 or 1, 5" class="app-input">
           <button id="btn-clear-seq" class="sec-btn">Clear</button>
         </div>
+        ${obs.getSeqArray().length > 1 ? `
+          <div class="seq-badges-info" style="margin-top: 8px; padding: 8px; background: rgba(15, 23, 42, 0.4); border-radius: 6px; border: 1px solid rgba(56, 189, 248, 0.2);">
+            <div style="font-size: 11px; color: var(--text-dim); margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center;">
+              <span><i class="fa-solid fa-arrows-spin"></i> Independent Positions:</span>
+              <button id="btn-distribute-seq-angles" class="sec-btn" style="padding: 2px 8px; font-size: 10px;" title="Space numbers evenly around the obstacle">Distribute</button>
+            </div>
+            <div id="seq-badge-chips" style="display: flex; flex-wrap: wrap; gap: 6px;">
+              ${obs.getSeqArray().map(s => `
+                <span class="badge-chip" style="font-size: 11px; padding: 2px 8px; background: #0f172a; border: 1px solid #38bdf8; border-radius: 12px; color: #f8fafc;">
+                  #${s}: <strong>${typeof obs.getBadgeAngle === 'function' ? obs.getBadgeAngle(s) : (obs.badgeAngleDeg || -135)}°</strong>
+                </span>
+              `).join('')}
+            </div>
+            <div style="font-size: 10px; color: var(--text-muted); margin-top: 6px;">
+              <i class="fa-solid fa-hand-pointer"></i> Drag each number circle on canvas independently.
+            </div>
+          </div>
+        ` : ''}
       </div>
 
       <!-- Wrap & Dog Jumping Direction Section -->
@@ -161,13 +187,41 @@ export class PropertyPanel {
         const arr = raw.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n) && n > 0);
         obs.seq = arr.length === 0 ? null : (arr.length === 1 ? arr[0] : arr);
       }
+      if (typeof obs.cleanBadgeAngles === 'function') {
+        obs.cleanBadgeAngles();
+      }
+      this._updateBadgeAnglesDisplay();
       this.canvasEngine.render();
+    });
+
+    seqInput?.addEventListener('change', () => {
+      this.render();
+      this.historyManager.push(this.canvasEngine.getSnapshot());
     });
 
     this.container.querySelector('#btn-clear-seq')?.addEventListener('click', () => {
       obs.seq = null;
+      if (typeof obs.cleanBadgeAngles === 'function') obs.cleanBadgeAngles();
       this.render();
       this.canvasEngine.render();
+      this.historyManager.push(this.canvasEngine.getSnapshot());
+    });
+
+    this.container.querySelector('#btn-distribute-seq-angles')?.addEventListener('click', () => {
+      const seqs = obs.getSeqArray();
+      if (seqs.length > 1) {
+        const baseAngle = obs.badgeAngleDeg !== undefined ? obs.badgeAngleDeg : -135;
+        const step = 360 / seqs.length;
+        seqs.forEach((s, idx) => {
+          let angle = Math.round(baseAngle + idx * step);
+          while (angle > 180) angle -= 360;
+          while (angle <= -180) angle += 360;
+          obs.setBadgeAngle(s, angle);
+        });
+        this.render();
+        this.canvasEngine.render();
+        this.historyManager.push(this.canvasEngine.getSnapshot());
+      }
     });
 
     // Wrap buttons (including Reverse Wrap buttons!)
@@ -229,5 +283,18 @@ export class PropertyPanel {
     this.container.querySelector('#btn-duplicate')?.addEventListener('click', () => {
       this.canvasEngine.duplicateSelected();
     });
+  }
+
+  _updateBadgeAnglesDisplay() {
+    if (!this.selectedObstacle) return;
+    const obs = this.selectedObstacle;
+    const container = this.container.querySelector('#seq-badge-chips');
+    if (container) {
+      container.innerHTML = obs.getSeqArray().map(s => `
+        <span class="badge-chip" style="font-size: 11px; padding: 2px 8px; background: #0f172a; border: 1px solid #38bdf8; border-radius: 12px; color: #f8fafc;">
+          #${s}: <strong>${typeof obs.getBadgeAngle === 'function' ? obs.getBadgeAngle(s) : (obs.badgeAngleDeg || -135)}°</strong>
+        </span>
+      `).join('');
+    }
   }
 }
