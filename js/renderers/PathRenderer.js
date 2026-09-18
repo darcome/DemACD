@@ -4,7 +4,7 @@
 import { distance } from '../core/math.js';
 
 export class PathRenderer {
-  static render(ctx, pathModel, obstacles, field) {
+  static render(ctx, pathModel, obstacles, field, activeDrag = null) {
     if (!pathModel.showPath && !pathModel.showSequenceNumbers) return;
 
     const sequencedList = pathModel.getSequencedObstacles(obstacles);
@@ -54,56 +54,88 @@ export class PathRenderer {
     // 2. Render Sequence Number Badges (1, 2, 3...)
     if (pathModel.showSequenceNumbers) {
       sequencedList.forEach(obs => {
-        this._renderSequenceBadge(ctx, obs, field);
+        this._renderSequenceBadge(ctx, obs, field, pathModel.showBadgePosMode, activeDrag);
       });
     }
   }
 
-  static _renderSequenceBadge(ctx, obs, field) {
-    const px = field.toPixels(obs.x);
-    const py = field.toPixels(obs.y);
-    const widthPx = field.toPixels(obs.widthMeters);
-    const depthPx = field.toPixels(obs.depthMeters);
+  static _renderSequenceBadge(ctx, obs, field, isPosModeActive = false, activeDrag = null) {
+    const seqArr = typeof obs.getSeqArray === 'function' ? obs.getSeqArray() : (obs.seq ? [obs.seq] : []);
+    if (!seqArr || seqArr.length === 0) return;
 
-    const seqStr = typeof obs.getSeqString === 'function' ? obs.getSeqString() : (obs.seq ? obs.seq.toString() : '');
-    if (!seqStr) return;
+    const obsPx = field.toPixels(obs.x);
+    const obsPy = field.toPixels(obs.y);
+    const rxPx = field.toPixels(Math.max(obs.widthMeters / 2 + 0.8, 1.4));
+    const ryPx = field.toPixels(Math.max(obs.depthMeters / 2 + 0.8, 1.4));
+    const obsRotRad = (obs.rotation * Math.PI) / 180;
 
-    // Position badge offset near the takeoff side of the obstacle
-    const badgeX = px - widthPx / 2 - 18;
-    const badgeY = py - depthPx / 2 - 18;
-    const badgeRadius = Math.max(14, 10 + seqStr.length * 3);
+    const isThisObsDragged = !!(activeDrag && activeDrag.obs === obs);
 
-    ctx.save();
-    // Shadow
-    ctx.shadowColor = 'rgba(0,0,0,0.5)';
-    ctx.shadowBlur = 8;
-    ctx.shadowOffsetY = 3;
+    // Render orbital ellipse guide line rotated to match obstacle orientation!
+    if (isPosModeActive || obs.isSelected || isThisObsDragged) {
+      ctx.save();
+      ctx.strokeStyle = (isPosModeActive || isThisObsDragged) ? '#f59e0b' : '#38bdf8';
+      ctx.lineWidth = (isPosModeActive || isThisObsDragged) ? 1.8 : 1.2;
+      ctx.setLineDash([5, 5]);
+      ctx.shadowColor = (isPosModeActive || isThisObsDragged) ? 'rgba(245, 158, 11, 0.4)' : 'rgba(56, 189, 248, 0.3)';
+      ctx.shadowBlur = 6;
 
-    // Circle Badge background
-    ctx.fillStyle = '#0f172a'; // Dark slate
-    ctx.strokeStyle = '#38bdf8'; // Electric sky blue border
-    ctx.lineWidth = 2.5;
-
-    ctx.beginPath();
-    if (seqStr.length <= 3) {
-      ctx.arc(badgeX, badgeY, badgeRadius, 0, Math.PI * 2);
-    } else {
-      const boxW = badgeRadius * 2.2;
-      const boxH = badgeRadius * 1.6;
-      ctx.roundRect ? ctx.roundRect(badgeX - boxW / 2, badgeY - boxH / 2, boxW, boxH, 8) : ctx.arc(badgeX, badgeY, badgeRadius, 0, Math.PI * 2);
+      ctx.beginPath();
+      if (typeof ctx.ellipse === 'function') {
+        ctx.ellipse(obsPx, obsPy, rxPx, ryPx, obsRotRad, 0, Math.PI * 2);
+      } else {
+        ctx.save();
+        ctx.translate(obsPx, obsPy);
+        ctx.rotate(obsRotRad);
+        ctx.arc(0, 0, Math.max(rxPx, ryPx), 0, Math.PI * 2);
+        ctx.restore();
+      }
+      ctx.stroke();
+      ctx.restore();
     }
-    ctx.fill();
-    ctx.stroke();
 
-    // Sequence Number Text
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = '#f8fafc';
-    ctx.font = 'bold 13px Outfit, Inter, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(seqStr, badgeX, badgeY);
+    // Render each sequence badge independently
+    seqArr.forEach(seq => {
+      const bPos = typeof obs.getBadgeWorldPosition === 'function' ? obs.getBadgeWorldPosition(seq) : { x: obs.x, y: obs.y };
+      const badgeX = field.toPixels(bPos.x);
+      const badgeY = field.toPixels(bPos.y);
+      const seqStr = seq.toString();
+      const isDraggedSeq = isThisObsDragged && activeDrag.seq === seq;
 
-    ctx.restore();
+      ctx.save();
+      const baseRadius = 11;
+      const badgeRadius = Math.max(baseRadius, 6 + seqStr.length * 2.5);
+
+      // Render Sequence Badge Circle / Pill
+      ctx.fillStyle = '#0f172a';
+      ctx.strokeStyle = isDraggedSeq ? '#f59e0b' : (obs.isSelected ? '#38bdf8' : '#38bdf8');
+      ctx.lineWidth = isDraggedSeq ? 2.8 : (obs.isSelected ? 2.2 : 1.8);
+      ctx.shadowColor = isDraggedSeq ? 'rgba(245, 158, 11, 0.8)' : 'rgba(0, 0, 0, 0.6)';
+      ctx.shadowBlur = isDraggedSeq ? 8 : 5;
+
+      ctx.beginPath();
+      if (seqStr.length <= 2) {
+        ctx.arc(badgeX, badgeY, baseRadius, 0, Math.PI * 2);
+      } else {
+        const boxW = badgeRadius * 2.2;
+        const boxH = 18;
+        if (typeof ctx.roundRect === 'function') {
+          ctx.roundRect(badgeX - boxW / 2, badgeY - boxH / 2, boxW, boxH, 9);
+        } else {
+          ctx.arc(badgeX, badgeY, badgeRadius, 0, Math.PI * 2);
+        }
+      }
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = isDraggedSeq ? '#fbbf24' : '#f8fafc';
+      ctx.font = 'bold 11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(seqStr, badgeX, badgeY);
+      ctx.restore();
+    });
   }
 
   static _renderPathArrow(ctx, p1, p2) {
