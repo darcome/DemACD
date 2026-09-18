@@ -444,6 +444,7 @@
       this.wrap = options.wrap || WRAP_DIRECTIONS.NONE;
       this.curve = options.curve || 0;
       this.badgeAngleDeg = options.badgeAngleDeg !== undefined ? options.badgeAngleDeg : -135;
+      this.badgeAngles = (options.badgeAngles && typeof options.badgeAngles === 'object') ? { ...options.badgeAngles } : {};
       this.isSelected = false;
 
       const isTunnelType = type === OBSTACLE_TYPES.TUNNEL || (typeof type === 'string' && type.startsWith('tunnel'));
@@ -669,10 +670,54 @@
       return this.getSeqArray().includes(num);
     }
 
-    getBadgeWorldPosition() {
+    getBadgeAngle(seq) {
+      if (this.badgeAngles && seq !== undefined && seq !== null && this.badgeAngles[seq] !== undefined) {
+        return this.badgeAngles[seq];
+      }
+      const seqs = this.getSeqArray();
+      const sNum = Number(seq);
+      const idx = seqs.indexOf(sNum);
+      const baseAngle = this.badgeAngleDeg !== undefined ? this.badgeAngleDeg : -135;
+      if (idx <= 0) {
+        return baseAngle;
+      }
+      // Distribute unpositioned badges evenly around orbital ellipse
+      const step = 360 / Math.max(seqs.length, 2);
+      let angle = Math.round(baseAngle + idx * step);
+      while (angle > 180) angle -= 360;
+      while (angle <= -180) angle += 360;
+      return angle;
+    }
+
+    setBadgeAngle(seq, angleDeg) {
+      if (!this.badgeAngles) this.badgeAngles = {};
+      if (seq !== undefined && seq !== null) {
+        this.badgeAngles[seq] = angleDeg;
+      }
+      const seqs = this.getSeqArray();
+      if (seqs.length === 0 || seq === undefined || seq === null || seq === seqs[0] || seq == seqs[0]) {
+        this.badgeAngleDeg = angleDeg;
+      }
+    }
+
+    cleanBadgeAngles() {
+      if (!this.badgeAngles) {
+        this.badgeAngles = {};
+        return;
+      }
+      const validSeqs = new Set(this.getSeqArray().map(n => n.toString()));
+      Object.keys(this.badgeAngles).forEach(key => {
+        if (!validSeqs.has(key)) {
+          delete this.badgeAngles[key];
+        }
+      });
+    }
+
+    getBadgeWorldPosition(seq) {
       const rx = Math.max(this.widthMeters / 2 + 0.8, 1.4);
       const ry = Math.max(this.depthMeters / 2 + 0.8, 1.4);
-      const badgeRad = degToRad(this.badgeAngleDeg !== undefined ? this.badgeAngleDeg : -135);
+      const angleDeg = this.getBadgeAngle(seq);
+      const badgeRad = degToRad(angleDeg);
 
       const localX = rx * Math.cos(badgeRad);
       const localY = ry * Math.sin(badgeRad);
@@ -685,6 +730,14 @@
         x: this.x + (localX * cosR - localY * sinR),
         y: this.y + (localX * sinR + localY * cosR)
       };
+    }
+
+    getAllBadgeWorldPositions() {
+      return this.getSeqArray().map(seq => ({
+        seq,
+        ...this.getBadgeWorldPosition(seq),
+        angleDeg: this.getBadgeAngle(seq)
+      }));
     }
 
     getBadgeAngleFromWorldPosition(worldX, worldY) {
@@ -771,6 +824,7 @@
         id: this.id, type: this.type, x: this.x, y: this.y, rotation: this.rotation,
         widthMeters: this.widthMeters, depthMeters: this.depthMeters, seq: this.seq, wrap: this.wrap, curve: this.curve,
         badgeAngleDeg: this.badgeAngleDeg,
+        badgeAngles: this.badgeAngles,
         tunnelNodes: this.tunnelNodes ? this.tunnelNodes.map(n => ({ x: n.x, y: n.y })) : undefined
       };
     }
@@ -778,6 +832,7 @@
       return new Obstacle(j.type, j.x, j.y, {
         id: j.id, rotation: j.rotation, widthMeters: j.widthMeters, depthMeters: j.depthMeters,
         seq: j.seq, wrap: j.wrap, curve: j.curve, badgeAngleDeg: j.badgeAngleDeg,
+        badgeAngles: j.badgeAngles,
         tunnelNodes: j.tunnelNodes
       });
     }
@@ -917,7 +972,7 @@
   // --- 5. RENDERERS ---
 
   class PathRenderer {
-    static render(ctx, pathModel, obstacles, field) {
+    static render(ctx, pathModel, obstacles, field, activeDrag = null) {
       if (!pathModel.showPath && !pathModel.showSequenceNumbers) return;
       const list = pathModel.getSequencedObstacles(obstacles);
       const allWaypoints = pathModel.getAllWaypoints(obstacles);
@@ -1012,7 +1067,7 @@
 
       // 4. Render Sequence Number Badges (1, 2, 3...)
       if (pathModel.showSequenceNumbers && list.length > 0) {
-        list.forEach(obs => this._renderSequenceBadge(ctx, obs, field));
+        list.forEach(obs => this._renderSequenceBadge(ctx, obs, field, pathModel.showBadgePosMode, activeDrag));
       }
     }
 
@@ -1085,25 +1140,25 @@
       }
     }
 
-    static _renderSequenceBadge(ctx, obs, field, isPosModeActive = false) {
-      const bPos = obs.getBadgeWorldPosition();
-      const badgeX = field.toPixels(bPos.x);
-      const badgeY = field.toPixels(bPos.y);
+    static _renderSequenceBadge(ctx, obs, field, isPosModeActive = false, activeDrag = null) {
+      const seqArr = typeof obs.getSeqArray === 'function' ? obs.getSeqArray() : (obs.seq ? [obs.seq] : []);
+      if (!seqArr || seqArr.length === 0) return;
+
       const obsPx = field.toPixels(obs.x);
       const obsPy = field.toPixels(obs.y);
       const rxPx = field.toPixels(Math.max(obs.widthMeters / 2 + 0.8, 1.4));
       const ryPx = field.toPixels(Math.max(obs.depthMeters / 2 + 0.8, 1.4));
       const obsRotRad = degToRad(obs.rotation || 0);
 
-      ctx.save();
+      const isThisObsDragged = !!(activeDrag && activeDrag.obs === obs);
 
       // Render orbital ellipse guide line rotated to match obstacle orientation!
-      if (isPosModeActive || obs.isSelected) {
+      if (isPosModeActive || obs.isSelected || isThisObsDragged) {
         ctx.save();
-        ctx.strokeStyle = isPosModeActive ? '#f59e0b' : '#38bdf8';
-        ctx.lineWidth = isPosModeActive ? 1.8 : 1.2;
+        ctx.strokeStyle = (isPosModeActive || isThisObsDragged) ? '#f59e0b' : '#38bdf8';
+        ctx.lineWidth = (isPosModeActive || isThisObsDragged) ? 1.8 : 1.2;
         ctx.setLineDash([5, 5]);
-        ctx.shadowColor = isPosModeActive ? 'rgba(245, 158, 11, 0.4)' : 'rgba(56, 189, 248, 0.3)';
+        ctx.shadowColor = (isPosModeActive || isThisObsDragged) ? 'rgba(245, 158, 11, 0.4)' : 'rgba(56, 189, 248, 0.3)';
         ctx.shadowBlur = 6;
 
         ctx.beginPath();
@@ -1120,40 +1175,48 @@
         ctx.restore();
       }
 
-      const seqStr = typeof obs.getSeqString === 'function' ? obs.getSeqString() : (obs.seq ? obs.seq.toString() : '');
-      if (!seqStr) return;
+      // Render each sequence badge independently
+      seqArr.forEach(seq => {
+        const bPos = obs.getBadgeWorldPosition(seq);
+        const badgeX = field.toPixels(bPos.x);
+        const badgeY = field.toPixels(bPos.y);
+        const seqStr = seq.toString();
+        const isDraggedSeq = isThisObsDragged && activeDrag.seq === seq;
 
-      const badgeRadius = Math.max(9, 6 + seqStr.length * 2.5);
+        ctx.save();
+        const baseRadius = 11;
+        const badgeRadius = Math.max(baseRadius, 6 + seqStr.length * 2.5);
 
-      // Render Sequence Badge Circle / Pill
-      ctx.fillStyle = '#0f172a';
-      ctx.strokeStyle = isPosModeActive ? '#f59e0b' : '#38bdf8';
-      ctx.lineWidth = isPosModeActive ? 2.5 : 2.0;
-      ctx.shadowColor = 'rgba(0,0,0,0.6)';
-      ctx.shadowBlur = 6;
+        // Render Sequence Badge Circle / Pill
+        ctx.fillStyle = '#0f172a';
+        ctx.strokeStyle = isDraggedSeq ? '#f59e0b' : (obs.isSelected ? '#38bdf8' : '#38bdf8');
+        ctx.lineWidth = isDraggedSeq ? 2.8 : (obs.isSelected ? 2.2 : 1.8);
+        ctx.shadowColor = isDraggedSeq ? 'rgba(245, 158, 11, 0.8)' : 'rgba(0, 0, 0, 0.6)';
+        ctx.shadowBlur = isDraggedSeq ? 8 : 5;
 
-      ctx.beginPath();
-      if (seqStr.length <= 2) {
-        ctx.arc(badgeX, badgeY, badgeRadius, 0, Math.PI * 2);
-      } else {
-        const boxW = badgeRadius * 2.2;
-        const boxH = 18;
-        if (typeof ctx.roundRect === 'function') {
-          ctx.roundRect(badgeX - boxW / 2, badgeY - boxH / 2, boxW, boxH, 9);
+        ctx.beginPath();
+        if (seqStr.length <= 2) {
+          ctx.arc(badgeX, badgeY, baseRadius, 0, Math.PI * 2);
         } else {
-          ctx.arc(badgeX, badgeY, badgeRadius, 0, Math.PI * 2);
+          const boxW = badgeRadius * 2.2;
+          const boxH = 18;
+          if (typeof ctx.roundRect === 'function') {
+            ctx.roundRect(badgeX - boxW / 2, badgeY - boxH / 2, boxW, boxH, 9);
+          } else {
+            ctx.arc(badgeX, badgeY, badgeRadius, 0, Math.PI * 2);
+          }
         }
-      }
-      ctx.fill();
-      ctx.stroke();
+        ctx.fill();
+        ctx.stroke();
 
-      ctx.shadowBlur = 0;
-      ctx.fillStyle = '#f8fafc';
-      ctx.font = 'bold 11px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(seqStr, badgeX, badgeY);
-      ctx.restore();
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = isDraggedSeq ? '#fbbf24' : '#f8fafc';
+        ctx.font = 'bold 11px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(seqStr, badgeX, badgeY);
+        ctx.restore();
+      });
     }
   }
 
@@ -1554,6 +1617,9 @@
       this.mode = 'select';
       this.measureStart = null; this.measureEnd = null;
       this.isDragging = false; this.dragStartPoint = { x: 0, y: 0 };
+      this.isDraggingBadge = false;
+      this.draggedBadgeObs = null;
+      this.draggedBadgeSeq = null;
 
       this._initEvents();
       this.resizeCanvas();
@@ -1661,7 +1727,10 @@
 
       this._renderFieldSurface();
       if (this.field.showGrid) this._renderGrid();
-      PathRenderer.render(this.ctx, this.pathModel, this.obstacles, this.field);
+      PathRenderer.render(this.ctx, this.pathModel, this.obstacles, this.field, {
+        obs: this.draggedBadgeObs,
+        seq: this.draggedBadgeSeq
+      });
       this.obstacles.forEach(o => ObstacleRenderer.render(this.ctx, o, this.field));
       if (this.mode === 'measure' && this.measureStart && this.measureEnd) this._renderMeasuringTape();
 
@@ -1866,16 +1935,25 @@
 
       // 3. SEQUENCE BADGE POSITIONING (Checked if sequence numbers are shown)
       if (this.pathModel.showSequenceNumbers) {
-        const hitBadgeObs = this.obstacles.find(o => {
-          const hasSeq = typeof o.getSeqArray === 'function' ? o.getSeqArray().length > 0 : (o.seq !== null && o.seq !== undefined && o.seq > 0);
-          if (!hasSeq) return false;
-          const bPos = o.getBadgeWorldPosition();
-          return distance(pos, bPos) < 1.2;
-        });
+        let closestBadge = null;
+        for (const o of this.obstacles) {
+          const seqs = typeof o.getSeqArray === 'function' ? o.getSeqArray() : (o.seq ? [o.seq] : []);
+          for (const s of seqs) {
+            const bPos = o.getBadgeWorldPosition(s);
+            const d = distance(pos, bPos);
+            if (d < 1.2) {
+              if (!closestBadge || d < closestBadge.dist) {
+                closestBadge = { obs: o, seq: s, dist: d };
+              }
+            }
+          }
+        }
 
-        if (hitBadgeObs) {
+        if (closestBadge) {
           this.isDraggingBadge = true;
-          this.draggedBadgeObs = hitBadgeObs;
+          this.draggedBadgeObs = closestBadge.obs;
+          this.draggedBadgeSeq = closestBadge.seq;
+          this.render();
           return;
         }
       }
@@ -1925,12 +2003,15 @@
       }
 
       // Interactive dragging of sequence number badges along orbital ellipse
-      if (this.isDraggingBadge && this.draggedBadgeObs) {
+      if (this.isDraggingBadge && this.draggedBadgeObs && this.draggedBadgeSeq !== null && this.draggedBadgeSeq !== undefined) {
         let deg = this.draggedBadgeObs.getBadgeAngleFromWorldPosition(pos.x, pos.y);
         if (this.field.snapToGrid) {
           deg = Math.round(deg / 15) * 15;
         }
-        this.draggedBadgeObs.badgeAngleDeg = deg;
+        this.draggedBadgeObs.setBadgeAngle(this.draggedBadgeSeq, deg);
+        if (typeof this.onObstacleChange === 'function') {
+          this.onObstacleChange(this.draggedBadgeObs);
+        }
         this.render();
         return;
       }
@@ -2040,12 +2121,16 @@
 
       // 4. Check if hovering over any sequence badge
       if (!isHoverInteractive && this.pathModel.showSequenceNumbers) {
-        const hoverBadgeObs = this.obstacles.find(o => {
-          const hasSeq = typeof o.getSeqArray === 'function' ? o.getSeqArray().length > 0 : (o.seq !== null && o.seq !== undefined && o.seq > 0);
-          if (!hasSeq) return false;
-          return distance(pos, o.getBadgeWorldPosition()) < 1.2;
-        });
-        if (hoverBadgeObs) isHoverInteractive = true;
+        for (const o of this.obstacles) {
+          const seqs = typeof o.getSeqArray === 'function' ? o.getSeqArray() : (o.seq ? [o.seq] : []);
+          for (const s of seqs) {
+            if (distance(pos, o.getBadgeWorldPosition(s)) < 1.2) {
+              isHoverInteractive = true;
+              break;
+            }
+          }
+          if (isHoverInteractive) break;
+        }
       }
 
       // Apply cursor style
@@ -2074,7 +2159,9 @@
       if (this.isDraggingBadge) {
         this.isDraggingBadge = false;
         this.draggedBadgeObs = null;
+        this.draggedBadgeSeq = null;
         this.historyManager.push(this.getSnapshot());
+        this.render();
       }
 
       if (this.isDraggingPathNode) {
@@ -2170,6 +2257,13 @@
         this.selectedObstacle = sel.length === 1 ? sel[0] : null;
         this.render();
       };
+      const prevObsChange = this.canvasEngine.onObstacleChange;
+      this.canvasEngine.onObstacleChange = obs => {
+        if (typeof prevObsChange === 'function') prevObsChange(obs);
+        if (this.selectedObstacle === obs) {
+          this._updateBadgeAnglesDisplay();
+        }
+      };
       this.render();
     }
     render() {
@@ -2198,6 +2292,24 @@
             <input type="text" id="prop-seq" value="${typeof obs.getSeqString === 'function' ? obs.getSeqString() : (obs.seq !== null ? obs.seq : '')}" placeholder="e.g. 1 or 1, 5" class="app-input">
             <button id="btn-clear-seq" class="sec-btn">Clear</button>
           </div>
+          ${obs.getSeqArray().length > 1 ? `
+            <div class="seq-badges-info" style="margin-top: 8px; padding: 8px; background: rgba(15, 23, 42, 0.4); border-radius: 6px; border: 1px solid rgba(56, 189, 248, 0.2);">
+              <div style="font-size: 11px; color: var(--text-dim); margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center;">
+                <span><i class="fa-solid fa-arrows-spin"></i> Independent Positions:</span>
+                <button id="btn-distribute-seq-angles" class="sec-btn" style="padding: 2px 8px; font-size: 10px;" title="Space numbers evenly around the obstacle">Distribute</button>
+              </div>
+              <div id="seq-badge-chips" style="display: flex; flex-wrap: wrap; gap: 6px;">
+                ${obs.getSeqArray().map(s => `
+                  <span class="badge-chip" style="font-size: 11px; padding: 2px 8px; background: #0f172a; border: 1px solid #38bdf8; border-radius: 12px; color: #f8fafc;">
+                    #${s}: <strong>${obs.getBadgeAngle(s)}°</strong>
+                  </span>
+                `).join('')}
+              </div>
+              <div style="font-size: 10px; color: var(--text-muted); margin-top: 6px;">
+                <i class="fa-solid fa-hand-pointer"></i> Drag each number circle on canvas independently.
+              </div>
+            </div>
+          ` : ''}
         </div>
 
         <div class="panel-section highlight-section">
@@ -2262,10 +2374,38 @@
           const arr = raw.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n) && n > 0);
           obs.seq = arr.length === 0 ? null : (arr.length === 1 ? arr[0] : arr);
         }
+        if (typeof obs.cleanBadgeAngles === 'function') {
+          obs.cleanBadgeAngles();
+        }
+        this._updateBadgeAnglesDisplay();
         this.canvasEngine.render();
       });
+      this.container.querySelector('#prop-seq')?.addEventListener('change', () => {
+        this.render();
+        this.historyManager.push(this.canvasEngine.getSnapshot());
+      });
       this.container.querySelector('#btn-clear-seq')?.addEventListener('click', () => {
-        obs.seq = null; this.render(); this.canvasEngine.render();
+        obs.seq = null;
+        if (typeof obs.cleanBadgeAngles === 'function') obs.cleanBadgeAngles();
+        this.render();
+        this.canvasEngine.render();
+        this.historyManager.push(this.canvasEngine.getSnapshot());
+      });
+      this.container.querySelector('#btn-distribute-seq-angles')?.addEventListener('click', () => {
+        const seqs = obs.getSeqArray();
+        if (seqs.length > 1) {
+          const baseAngle = obs.badgeAngleDeg !== undefined ? obs.badgeAngleDeg : -135;
+          const step = 360 / seqs.length;
+          seqs.forEach((s, idx) => {
+            let angle = Math.round(baseAngle + idx * step);
+            while (angle > 180) angle -= 360;
+            while (angle <= -180) angle += 360;
+            obs.setBadgeAngle(s, angle);
+          });
+          this.render();
+          this.canvasEngine.render();
+          this.historyManager.push(this.canvasEngine.getSnapshot());
+        }
       });
       this.container.querySelectorAll('.wrap-btn').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -2290,6 +2430,19 @@
         this.historyManager.push(this.canvasEngine.getSnapshot());
       });
       this.container.querySelector('#btn-duplicate')?.addEventListener('click', () => this.canvasEngine.duplicateSelected());
+    }
+
+    _updateBadgeAnglesDisplay() {
+      if (!this.selectedObstacle) return;
+      const obs = this.selectedObstacle;
+      const container = this.container.querySelector('#seq-badge-chips');
+      if (container) {
+        container.innerHTML = obs.getSeqArray().map(s => `
+          <span class="badge-chip" style="font-size: 11px; padding: 2px 8px; background: #0f172a; border: 1px solid #38bdf8; border-radius: 12px; color: #f8fafc;">
+            #${s}: <strong>${obs.getBadgeAngle(s)}°</strong>
+          </span>
+        `).join('');
+      }
     }
   }
 
