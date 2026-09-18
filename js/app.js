@@ -2607,7 +2607,12 @@
       this.canvasEngine = new CanvasEngine(this.canvasElement, this.field, this.pathModel, this.historyManager);
 
       this.babylonCanvas = document.getElementById('babylon-canvas');
-      this.babylonEngine = new BabylonEngine(this.babylonCanvas);
+      this.babylonEngine = new BabylonEngine(this.babylonCanvas, { mode: 'orbit' });
+
+      this.arucoBabylonCanvas = document.getElementById('aruco-babylon-canvas');
+      this.arucoBabylonEngine = new BabylonEngine(this.arucoBabylonCanvas, { mode: 'ar' });
+      this.showAr3DCourse = true;
+      window.agilityApp = this;
 
       this.toolbar = new Toolbar(document.getElementById('toolbar-palette'), this.canvasEngine, this.field, this.historyManager);
       this.propertyPanel = new PropertyPanel(document.getElementById('property-panel-container'), this.canvasEngine, this.historyManager);
@@ -2626,7 +2631,48 @@
       this.historyManager.clear();
       this.historyManager.push(this.canvasEngine.getSnapshot());
     }
+
+    onArMarkersDetected(detectedMarkers, imgWidth, imgHeight) {
+      if (!this.arucoBabylonEngine || !this.showAr3DCourse) return;
+
+      const idToKeyMap = window.arucoTracker ? window.arucoTracker.getIdToKeyMap() : {};
+      const res = this.arucoBabylonEngine.alignWithMarkers(
+        detectedMarkers,
+        this.field,
+        imgWidth || 1280,
+        imgHeight || 720,
+        idToKeyMap
+      );
+
+      const statusTextEl = document.getElementById('aruco-ar-status-text');
+      if (statusTextEl && res) {
+        if (res.status === 'locked') {
+          statusTextEl.innerHTML = `<i class="fa-solid fa-anchor" style="color: #f87171;"></i> 3D: Anchor Locked`;
+        } else if (res.status === 'multi') {
+          statusTextEl.innerHTML = `<i class="fa-solid fa-cube" style="color: #34d399;"></i> 3D: ${res.markerCount} Markers Aligned`;
+        } else if (res.status === 'single') {
+          const mKey = res.primaryKey || 'Single';
+          const def = window.arucoTracker?.markerDefinitions.find(d => d.key === mKey);
+          const name = def ? def.name : mKey;
+          statusTextEl.innerHTML = `<i class="fa-solid fa-cube" style="color: #38bdf8;"></i> 3D: Aligned (${name})`;
+        } else if (res.status === 'holding') {
+          statusTextEl.innerHTML = `<i class="fa-solid fa-clock" style="color: #fbbf24;"></i> 3D: Holding Anchor...`;
+        } else {
+          statusTextEl.innerHTML = `<i class="fa-solid fa-magnifying-glass" style="color: #94a3b8;"></i> 3D: Searching Marker...`;
+        }
+      }
+    }
+
     _bindHeaderActions() {
+      // Dynamic Viewport Height (--dvh) fix for iOS Safari & mobile browsers
+      const updateViewportHeight = () => {
+        const dvh = window.innerHeight * 0.01;
+        document.documentElement.style.setProperty('--dvh', `${dvh}px`);
+      };
+      window.addEventListener('resize', updateViewportHeight);
+      window.addEventListener('orientationchange', updateViewportHeight);
+      updateViewportHeight();
+
       const undoBtn = document.getElementById('btn-undo');
       const redoBtn = document.getElementById('btn-redo');
       this.historyManager.setOnChange(({ canUndo, canRedo }) => {
@@ -2642,31 +2688,86 @@
         if (next) this.canvasEngine.loadSnapshot(next);
       });
 
-      // 2D / 3D View Mode Tab Switching
+      // 2D / 3D / ArUco View Mode Tab Switching
       const tab2D = document.getElementById('tab-btn-2d');
       const tab3D = document.getElementById('tab-btn-3d');
+      const tabAruco = document.getElementById('tab-btn-aruco');
 
       const view2D = document.getElementById('view-2d-container');
       const view3D = document.getElementById('view-3d-container');
+      const viewAruco = document.getElementById('view-aruco-container');
+      const appRoot = document.getElementById('app-root');
 
       const switchTo2D = () => {
         tab2D?.classList.add('active');
         tab3D?.classList.remove('active');
+        tabAruco?.classList.remove('active');
         view2D?.classList.add('active');
         view3D?.classList.remove('active');
+        viewAruco?.classList.remove('active');
+        appRoot?.classList.remove('aruco-active');
         this.canvasEngine.render();
       };
 
       const switchTo3D = () => {
         tab3D?.classList.add('active');
         tab2D?.classList.remove('active');
+        tabAruco?.classList.remove('active');
         view3D?.classList.add('active');
         view2D?.classList.remove('active');
+        viewAruco?.classList.remove('active');
+        appRoot?.classList.remove('aruco-active');
         this.babylonEngine.updateScene(this.field, this.canvasEngine.obstacles, this.pathModel);
+        // CRITICAL: Resize Babylon engine immediately upon becoming visible!
+        if (this.babylonEngine) {
+          this.babylonEngine.resize();
+          requestAnimationFrame(() => {
+            this.babylonEngine.resize();
+          });
+        }
+      };
+
+      const switchToAruco = () => {
+        tabAruco?.classList.add('active');
+        tab2D?.classList.remove('active');
+        tab3D?.classList.remove('active');
+        viewAruco?.classList.add('active');
+        view2D?.classList.remove('active');
+        view3D?.classList.remove('active');
+        appRoot?.classList.add('aruco-active');
+        // Synchronize AR 3D Course with current field, obstacles and path
+        if (this.arucoBabylonEngine) {
+          this.arucoBabylonEngine.updateScene(this.field, this.canvasEngine.obstacles, this.pathModel);
+          this.arucoBabylonEngine.resize();
+          requestAnimationFrame(() => {
+            this.arucoBabylonEngine.resize();
+          });
+        }
       };
 
       tab2D?.addEventListener('click', switchTo2D);
       tab3D?.addEventListener('click', switchTo3D);
+      tabAruco?.addEventListener('click', switchToAruco);
+
+      // 3D View Controls (Touch Mode, Top-Down, Reset Cam, Opacity)
+      const btn3DTouchMode = document.getElementById('btn-3d-touch-mode');
+      const lbl3DTouchMode = document.getElementById('lbl-3d-touch-mode');
+      let current3DTouchMode = 'orbit';
+
+      btn3DTouchMode?.addEventListener('click', () => {
+        current3DTouchMode = current3DTouchMode === 'orbit' ? 'pan' : 'orbit';
+        if (lbl3DTouchMode) lbl3DTouchMode.textContent = current3DTouchMode === 'orbit' ? 'Orbit' : 'Pan';
+        btn3DTouchMode.classList.toggle('active', current3DTouchMode === 'orbit');
+        if (this.babylonEngine) {
+          this.babylonEngine.setTouchMode(current3DTouchMode);
+        }
+      });
+
+      document.getElementById('btn-3d-topdown')?.addEventListener('click', () => {
+        if (this.babylonEngine) {
+          this.babylonEngine.setTopDownView();
+        }
+      });
 
       document.getElementById('btn-reset-3d-cam')?.addEventListener('click', () => {
         this.babylonEngine.resetCamera();
@@ -2682,11 +2783,95 @@
         }
       });
 
+      // Mobile ArUco Sidebar Drawer Toggle
+      const btnArucoToggleSidebar = document.getElementById('btn-aruco-toggle-sidebar');
+      const arucoSidebar = document.querySelector('.aruco-ui-sidebar');
+      btnArucoToggleSidebar?.addEventListener('click', () => {
+        arucoSidebar?.classList.toggle('open');
+      });
+
+      // AR 3D Viewport Controls
+      const btnToggleAr3D = document.getElementById('btn-toggle-ar-3d');
+      btnToggleAr3D?.addEventListener('click', () => {
+        this.showAr3DCourse = !this.showAr3DCourse;
+        btnToggleAr3D.classList.toggle('active', this.showAr3DCourse);
+        if (this.arucoBabylonEngine) {
+          this.arucoBabylonEngine.setCourseVisible(this.showAr3DCourse);
+        }
+      });
+
+      const btnLockAnchor = document.getElementById('btn-ar-lock-anchor');
+      btnLockAnchor?.addEventListener('click', async () => {
+        if (!window.arucoPoseEstimator) return;
+        if (!window.arucoPoseEstimator.hasGyro) {
+          await window.arucoPoseEstimator.requestGyroPermission();
+        }
+        const isLocked = window.arucoPoseEstimator.toggleAnchorLock();
+        btnLockAnchor.classList.toggle('locked', isLocked);
+        btnLockAnchor.innerHTML = isLocked
+          ? '<i class="fa-solid fa-lock"></i> Anchor Locked'
+          : '<i class="fa-solid fa-anchor"></i> Lock Anchor';
+        btnLockAnchor.title = isLocked
+          ? 'Anchor locked! You can now walk around the field without losing 3D alignment'
+          : 'Lock 3D Course Anchor to walk around the field without marker in view';
+
+        const statusTextEl = document.getElementById('aruco-ar-status-text');
+        if (statusTextEl && isLocked) {
+          statusTextEl.innerHTML = '<i class="fa-solid fa-anchor" style="color: #f87171;"></i> 3D: Anchor Locked';
+        }
+      });
+
+      const arGroundSlider = document.getElementById('slider-ar-ground-opacity');
+      const arGroundVal = document.getElementById('val-ar-ground-opacity');
+      arGroundSlider?.addEventListener('input', e => {
+        const val = parseFloat(e.target.value);
+        if (arGroundVal) arGroundVal.textContent = `${Math.round(val * 100)}%`;
+        if (this.arucoBabylonEngine) {
+          this.arucoBabylonEngine.setGroundOpacity(val);
+        }
+      });
+
       // Collapsible Left & Right Sidebars
       const leftSidebar = document.getElementById('toolbar-palette');
       const rightSidebar = document.getElementById('property-panel-container');
       const btnToggleLeft = document.getElementById('btn-toggle-left-sidebar');
       const btnToggleRight = document.getElementById('btn-toggle-right-sidebar');
+      const sidebarBackdrop = document.getElementById('sidebar-backdrop');
+
+      const updateSidebarBackdrop = () => {
+        const isMobile = window.innerWidth <= 900;
+        const anyOpen = isMobile && (!leftSidebar?.classList.contains('collapsed') || !rightSidebar?.classList.contains('collapsed'));
+        sidebarBackdrop?.classList.toggle('active', !!anyOpen);
+      };
+
+      sidebarBackdrop?.addEventListener('click', () => {
+        leftSidebar?.classList.add('collapsed');
+        rightSidebar?.classList.add('collapsed');
+        if (btnToggleLeft) {
+          btnToggleLeft.innerHTML = '<i class="fa-solid fa-chevron-right"></i>';
+          btnToggleLeft.title = 'Expand Equipment Palette';
+        }
+        if (btnToggleRight) {
+          btnToggleRight.innerHTML = '<i class="fa-solid fa-chevron-left"></i>';
+          btnToggleRight.title = 'Expand Property Inspector';
+        }
+        updateSidebarBackdrop();
+        triggerCanvasResize();
+      });
+
+      // Auto-collapse sidebars on initial load if mobile/portrait
+      if (window.innerWidth <= 900) {
+        leftSidebar?.classList.add('collapsed');
+        rightSidebar?.classList.add('collapsed');
+        if (btnToggleLeft) {
+          btnToggleLeft.innerHTML = '<i class="fa-solid fa-chevron-right"></i>';
+          btnToggleLeft.title = 'Expand Equipment Palette';
+        }
+        if (btnToggleRight) {
+          btnToggleRight.innerHTML = '<i class="fa-solid fa-chevron-left"></i>';
+          btnToggleRight.title = 'Expand Property Inspector';
+        }
+      }
 
       const triggerCanvasResize = () => {
         setTimeout(() => {
@@ -2701,6 +2886,7 @@
           btnToggleLeft.innerHTML = isCollapsed ? '<i class="fa-solid fa-chevron-right"></i>' : '<i class="fa-solid fa-chevron-left"></i>';
           btnToggleLeft.title = isCollapsed ? 'Expand Equipment Palette' : 'Collapse Equipment Palette';
         }
+        updateSidebarBackdrop();
         triggerCanvasResize();
       });
 
@@ -2710,6 +2896,7 @@
           btnToggleRight.innerHTML = isCollapsed ? '<i class="fa-solid fa-chevron-left"></i>' : '<i class="fa-solid fa-chevron-right"></i>';
           btnToggleRight.title = isCollapsed ? 'Expand Property Inspector' : 'Collapse Property Inspector';
         }
+        updateSidebarBackdrop();
         triggerCanvasResize();
       });
       document.getElementById('btn-clear')?.addEventListener('click', () => {

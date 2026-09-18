@@ -27,16 +27,22 @@ function rad3D(deg) {
 }
 
 class BabylonEngine {
-  constructor(canvasElement) {
+  constructor(canvasElement, options = {}) {
     this.canvas = canvasElement;
+    this.options = options || {};
+    this.mode = this.options.mode || 'orbit'; // 'orbit' or 'ar'
     this.engine = null;
     this.scene = null;
     this.camera = null;
     this.shadowGenerator = null;
+    this.courseRoot = null;
     this.obstaclesGroup = null;
     this.trajectoryGroup = null;
+    this.groundMesh = null;
+    this.borderTube = null;
+    this.gridMesh = null;
     this.show3DPath = true;
-    this.groundOpacity = 0.35; // Default ground opacity for 3D view
+    this.groundOpacity = this.mode === 'ar' ? 0.15 : 0.35; // Subtle 15% turf in AR, 35% in orbit
     this.groundMat = null;
     this.currentField = null;
     this.currentObstacles = [];
@@ -57,32 +63,79 @@ class BabylonEngine {
 
   _initScene() {
     try {
-      this.engine = new BABYLON.Engine(this.canvas, true, { preserveDrawingBuffer: true, stencil: true });
-      this.scene = new BABYLON.Scene(this.engine);
-      this.scene.clearColor = new BABYLON.Color4(0.04, 0.07, 0.12, 1.0); // Rich dark navy background
+      if (this.mode === 'ar') {
+        // Transparent AR Engine & Scene
+        this.engine = new BABYLON.Engine(this.canvas, true, {
+          preserveDrawingBuffer: true,
+          stencil: true,
+          alpha: true
+        });
+        this.scene = new BABYLON.Scene(this.engine);
+        this.scene.clearColor = new BABYLON.Color4(0.0, 0.0, 0.0, 0.0); // Fully transparent
 
-      // Orbit ArcRotateCamera centered at origin
-      this.camera = new BABYLON.ArcRotateCamera("camera3d", -Math.PI / 2, Math.PI / 3, 40, BABYLON.Vector3.Zero(), this.scene);
-      this.camera.attachControl(this.canvas, true);
-      this.camera.lowerRadiusLimit = 4;
-      this.camera.upperRadiusLimit = 150;
-      this.camera.wheelPrecision = 15;
-      this.camera.panningSensibility = 50;
+        // Fixed AR Camera at origin (0,0,0) looking down +Z
+        this.camera = new BABYLON.TargetCamera("arCamera", new BABYLON.Vector3(0, 0, 0), this.scene);
+        this.camera.setTarget(new BABYLON.Vector3(0, 0, 1));
+        this.camera.fovMode = BABYLON.Camera.FOVMODE_VERTICAL_FIXED;
+        this.camera.minZ = 0.05;
+        this.camera.maxZ = 300;
 
-      // Hemispheric Ambient Light
-      const hemiLight = new BABYLON.HemisphericLight("hemiLight", new BABYLON.Vector3(0, 1, 0), this.scene);
-      hemiLight.intensity = 0.75;
-      hemiLight.diffuse = new BABYLON.Color3(0.95, 0.98, 1.0);
-      hemiLight.groundColor = new BABYLON.Color3(0.15, 0.25, 0.15);
+        // Hemispheric Ambient Light
+        const hemiLight = new BABYLON.HemisphericLight("arHemiLight", new BABYLON.Vector3(0, 1, 0), this.scene);
+        hemiLight.intensity = 0.85;
+        hemiLight.diffuse = new BABYLON.Color3(0.95, 0.98, 1.0);
+        hemiLight.groundColor = new BABYLON.Color3(0.25, 0.35, 0.25);
 
-      // Directional Sunlight with Shadows
-      const dirLight = new BABYLON.DirectionalLight("dirLight", new BABYLON.Vector3(-1, -2.5, -1), this.scene);
-      dirLight.position = new BABYLON.Vector3(30, 50, 30);
-      dirLight.intensity = 0.85;
+        // Directional Sun Light
+        const dirLight = new BABYLON.DirectionalLight("arDirLight", new BABYLON.Vector3(-0.8, -2.0, 0.5), this.scene);
+        dirLight.intensity = 0.8;
+      } else {
+        // Orbit 3D Visualizer Engine & Scene
+        this.engine = new BABYLON.Engine(this.canvas, true, { preserveDrawingBuffer: true, stencil: true });
+        this.scene = new BABYLON.Scene(this.engine);
+        this.scene.clearColor = new BABYLON.Color4(0.04, 0.07, 0.12, 1.0); // Rich dark navy background
 
-      this.shadowGenerator = new BABYLON.ShadowGenerator(1024, dirLight);
-      this.shadowGenerator.useBlurExponentialShadowMap = true;
-      this.shadowGenerator.blurKernel = 16;
+        // Orbit ArcRotateCamera centered at origin
+        this.camera = new BABYLON.ArcRotateCamera("camera3d", -Math.PI / 2, Math.PI / 3, 40, BABYLON.Vector3.Zero(), this.scene);
+        
+        // CRITICAL: noPreventDefault must be false so iOS Safari does NOT cancel touch events with pointercancel!
+        this.camera.attachControl(this.canvas, false);
+        this.camera.lowerRadiusLimit = 4;
+        this.camera.upperRadiusLimit = 150;
+        this.camera.wheelPrecision = 15;
+        this.camera.pinchPrecision = 12;
+        this.camera.panningSensibility = 50;
+        this.camera.angularSensibilityX = 1000;
+        this.camera.angularSensibilityY = 1000;
+        this.camera.upperBetaLimit = Math.PI / 2 - 0.05; // Prevent camera from dipping under ground
+        this.touchMode = 'orbit'; // 'orbit' or 'pan'
+
+        // Enforce touch-action none on canvas
+        if (this.canvas) {
+          this.canvas.style.touchAction = 'none';
+        }
+
+        // Hemispheric Ambient Light
+        const hemiLight = new BABYLON.HemisphericLight("hemiLight", new BABYLON.Vector3(0, 1, 0), this.scene);
+        hemiLight.intensity = 0.75;
+        hemiLight.diffuse = new BABYLON.Color3(0.95, 0.98, 1.0);
+        hemiLight.groundColor = new BABYLON.Color3(0.15, 0.25, 0.15);
+
+        // Directional Sunlight with Shadows
+        const dirLight = new BABYLON.DirectionalLight("dirLight", new BABYLON.Vector3(-1, -2.5, -1), this.scene);
+        dirLight.position = new BABYLON.Vector3(30, 50, 30);
+        dirLight.intensity = 0.85;
+
+        this.shadowGenerator = new BABYLON.ShadowGenerator(1024, dirLight);
+        this.shadowGenerator.useBlurExponentialShadowMap = true;
+        this.shadowGenerator.blurKernel = 16;
+      }
+
+      // Root TransformNode for entire course (moves/rotates all course meshes together in AR)
+      this.courseRoot = new BABYLON.TransformNode("courseRoot", this.scene);
+      if (this.mode === 'ar') {
+        this.courseRoot.setEnabled(false); // Initially hidden until marker aligned
+      }
 
       // Start Render Loop
       this.engine.runRenderLoop(() => {
@@ -90,7 +143,7 @@ class BabylonEngine {
       });
 
       window.addEventListener('resize', () => {
-        if (this.engine) this.engine.resize();
+        this.resize();
       });
 
       this.isInitialized = true;
@@ -100,20 +153,107 @@ class BabylonEngine {
   }
 
   resize() {
-    if (this.engine) this.engine.resize();
+    if (this.engine) {
+      this.engine.resize();
+      if (this.scene) {
+        this.scene.render();
+      }
+    }
+  }
+
+  setTouchMode(mode) {
+    if (!this.camera || this.mode === 'ar') return;
+    this.touchMode = mode; // 'orbit' or 'pan'
+    const pointersInput = this.camera.inputs && this.camera.inputs.attached && this.camera.inputs.attached.pointers;
+    if (pointersInput) {
+      if (mode === 'pan') {
+        // Map primary 1-finger pointer to camera panning
+        pointersInput.buttons = [2, 0, 1];
+      } else {
+        // Default: 1-finger orbits
+        pointersInput.buttons = [0, 1, 2];
+      }
+    }
+  }
+
+  setTopDownView() {
+    if (!this.camera || this.mode === 'ar') return;
+    this.camera.target = new BABYLON.Vector3(0, 0, 0);
+    this.camera.alpha = -Math.PI / 2;
+    this.camera.beta = 0.001; // Straight down
+    if (this.currentField) {
+      const maxDim = Math.max(this.currentField.widthMeters, this.currentField.lengthMeters);
+      this.camera.radius = maxDim * 1.35;
+    }
+    if (this.scene) this.scene.render();
   }
 
   resetCamera() {
-    if (!this.camera || !this.currentField) return;
+    if (!this.camera || !this.currentField || this.mode === 'ar') return;
     this.camera.target = new BABYLON.Vector3(0, 0, 0);
     this.camera.alpha = -Math.PI / 2;
     this.camera.beta = Math.PI / 3.2;
     const maxDim = Math.max(this.currentField.widthMeters, this.currentField.lengthMeters);
     this.camera.radius = maxDim * 1.15;
+    if (this.scene) this.scene.render();
+  }
+
+  // --- AR POSE & ALIGNMENT METHODS ---
+  setCoursePose(pose) {
+    if (!this.courseRoot || !pose) return;
+    this.courseRoot.position.set(pose.position.x, pose.position.y, pose.position.z);
+    if (pose.rotationQuaternion) {
+      if (!this.courseRoot.rotationQuaternion) {
+        this.courseRoot.rotationQuaternion = new BABYLON.Quaternion();
+      }
+      this.courseRoot.rotationQuaternion.set(
+        pose.rotationQuaternion.x,
+        pose.rotationQuaternion.y,
+        pose.rotationQuaternion.z,
+        pose.rotationQuaternion.w
+      );
+    }
+    this.courseRoot.setEnabled(true);
+  }
+
+  setCourseVisible(visible) {
+    if (this.courseRoot) {
+      this.courseRoot.setEnabled(!!visible);
+    }
+  }
+
+  updateCameraFov(width, height, fovDegrees = 60.0) {
+    if (!this.camera || this.mode !== 'ar') return;
+    const fovRad = (fovDegrees * Math.PI) / 180;
+    const fx = (width / 2) / Math.tan(fovRad / 2);
+    const fovY = 2 * Math.atan((height / 2) / fx);
+    this.camera.fov = fovY;
+  }
+
+  alignWithMarkers(detectedMarkers, field, videoWidth, videoHeight, idToKeyMap) {
+    if (!window.arucoPoseEstimator || this.mode !== 'ar') return null;
+
+    this.updateCameraFov(videoWidth, videoHeight, window.arucoPoseEstimator.fovDegrees);
+
+    const result = window.arucoPoseEstimator.estimatePose(
+      detectedMarkers,
+      idToKeyMap,
+      field || this.currentField,
+      videoWidth,
+      videoHeight
+    );
+
+    if (result && result.pose) {
+      this.setCoursePose(result.pose);
+    } else if (result && result.status === 'lost') {
+      this.setCourseVisible(false);
+    }
+
+    return result;
   }
 
   /**
-   * Main sync method called when switching to 3D tab or updating field/obstacles
+   * Main sync method called when switching to 3D tab, ArUco tab, or updating field/obstacles
    */
   updateScene(field, obstacles, pathModel) {
     if (!this.isInitialized) {
@@ -127,6 +267,8 @@ class BabylonEngine {
 
     // 1. Build Grass Ground Plane
     if (this.groundMesh) this.groundMesh.dispose();
+    if (this.borderTube) this.borderTube.dispose();
+    if (this.gridMesh) this.gridMesh.dispose();
     this._buildGround(field);
 
     // 2. Clear old obstacles
@@ -147,6 +289,15 @@ class BabylonEngine {
       this._build3DTrajectory(field, this.currentObstacles, pathModel);
     }
 
+    // 6. Parent all meshes under courseRoot for unified AR transformation
+    if (this.courseRoot) {
+      if (this.groundMesh) this.groundMesh.parent = this.courseRoot;
+      if (this.borderTube) this.borderTube.parent = this.courseRoot;
+      if (this.gridMesh) this.gridMesh.parent = this.courseRoot;
+      if (this.obstaclesGroup) this.obstaclesGroup.parent = this.courseRoot;
+      if (this.trajectoryGroup) this.trajectoryGroup.parent = this.courseRoot;
+    }
+
     this.resize();
   }
 
@@ -162,14 +313,14 @@ class BabylonEngine {
     const grassMat = new BABYLON.StandardMaterial("grassMat", this.scene);
     grassMat.diffuseColor = new BABYLON.Color3(0.08, 0.38, 0.18); // Deep rich agility turf green
     grassMat.specularColor = new BABYLON.Color3(0.05, 0.1, 0.05);
-    grassMat.alpha = this.groundOpacity !== undefined ? this.groundOpacity : 0.35;
+    grassMat.alpha = this.groundOpacity !== undefined ? this.groundOpacity : (this.mode === 'ar' ? 0.15 : 0.35);
     grassMat.transparencyMode = BABYLON.Material.MATERIAL_ALPHABLEND;
     grassMat.backFaceCulling = false;
     this.groundMat = grassMat;
     this.groundMesh.material = grassMat;
     this.groundMesh.receiveShadows = true;
 
-    // White Perimeter Field Boundary Tube
+    // White / Gold Perimeter Field Boundary Tube
     const perimeterPts = [
       new BABYLON.Vector3(-w / 2, 0.02, -l / 2),
       new BABYLON.Vector3(w / 2, 0.02, -l / 2),
@@ -177,11 +328,11 @@ class BabylonEngine {
       new BABYLON.Vector3(-w / 2, 0.02, l / 2),
       new BABYLON.Vector3(-w / 2, 0.02, -l / 2)
     ];
-    const borderTube = BABYLON.MeshBuilder.CreateTube("borderTube", { path: perimeterPts, radius: 0.08 }, this.scene);
+    this.borderTube = BABYLON.MeshBuilder.CreateTube("borderTube", { path: perimeterPts, radius: 0.08 }, this.scene);
     const borderMat = new BABYLON.StandardMaterial("borderMat", this.scene);
     borderMat.diffuseColor = new BABYLON.Color3(0.95, 0.75, 0.1); // Gold boundary line
     borderMat.emissiveColor = new BABYLON.Color3(0.3, 0.2, 0.0);
-    borderTube.material = borderMat;
+    this.borderTube.material = borderMat;
 
     // Grid Floor Markings (Subtle grid lines)
     const gridLines = [];
@@ -192,8 +343,8 @@ class BabylonEngine {
     for (let z = -Math.floor(l / 2); z <= Math.floor(l / 2); z += gridStep) {
       gridLines.push([new BABYLON.Vector3(-w / 2, 0.01, z), new BABYLON.Vector3(w / 2, 0.01, z)]);
     }
-    const gridMesh = BABYLON.MeshBuilder.CreateLineSystem("gridLines", { lines: gridLines }, this.scene);
-    gridMesh.color = new BABYLON.Color3(0.15, 0.55, 0.28);
+    this.gridMesh = BABYLON.MeshBuilder.CreateLineSystem("gridLines", { lines: gridLines }, this.scene);
+    this.gridMesh.color = new BABYLON.Color3(0.15, 0.55, 0.28);
   }
 
   // --- 2D -> 3D COORDINATE CONVERSION ---
