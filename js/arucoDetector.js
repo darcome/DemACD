@@ -34,6 +34,21 @@ class Aruco4x4Detector {
     // ArUco Parameters
     const DetectorParamsClass = cv.aruco_DetectorParameters || cv.DetectorParameters;
     this.detectorParams = DetectorParamsClass ? new DetectorParamsClass() : null;
+    if (this.detectorParams) {
+      // Enable subpixel corner refinement to drastically reduce 3D pose jitter
+      if (typeof cv.CORNER_REFINE_SUBPIX !== 'undefined') {
+        this.detectorParams.cornerRefinementMethod = cv.CORNER_REFINE_SUBPIX;
+      } else {
+        this.detectorParams.cornerRefinementMethod = 1; // 1 = CORNER_REFINE_SUBPIX in OpenCV 4.x
+      }
+      this.detectorParams.cornerRefinementWinSize = 5;
+      this.detectorParams.cornerRefinementMaxIterations = 30;
+      this.detectorParams.cornerRefinementMinAccuracy = 0.05;
+      this.detectorParams.adaptiveThreshWinSizeMin = 3;
+      this.detectorParams.adaptiveThreshWinSizeMax = 23;
+      this.detectorParams.adaptiveThreshWinSizeStep = 10;
+      this.detectorParams.minMarkerPerimeterRate = 0.02;
+    }
 
     const RefineParamsClass = cv.aruco_RefineParameters || cv.RefineParameters;
     this.refineParams = RefineParamsClass ? new RefineParamsClass(10.0, 3.0, true) : null;

@@ -1,15 +1,67 @@
 /**
  * Agility Course Designer - ArUco 3D Pose Estimator
- * Real-time 6-DoF camera/field pose estimation using planar homography decomposition.
+ * Real-time 6-DoF camera/field pose estimation using OpenCV PnP (SOLVEPNP_IPPE_SQUARE / SQPNP / ITERATIVE)
+ * with Hartley-Normalized DLT + Polar Rotation Orthonormalization fallback and 1-Euro adaptive jitter filter.
  * Supports single-marker placement, multi-marker refinement, Lock Anchor, and device gyroscope fusion.
  */
+
+class OneEuroScalarFilter {
+  constructor(minCutoff = 1.0, beta = 0.05, dCutoff = 1.0) {
+    this.minCutoff = minCutoff;
+    this.beta = beta;
+    this.dCutoff = dCutoff;
+    this.xPrev = null;
+    this.dxPrev = 0;
+    this.tPrev = null;
+  }
+
+  reset() {
+    this.xPrev = null;
+    this.dxPrev = 0;
+    this.tPrev = null;
+  }
+
+  _alpha(cutoff, dt) {
+    const tau = 1.0 / (2 * Math.PI * cutoff);
+    return 1.0 / (1.0 + tau / dt);
+  }
+
+  filter(x, tMs) {
+    if (this.tPrev === null || this.xPrev === null) {
+      this.xPrev = x;
+      this.dxPrev = 0;
+      this.tPrev = tMs;
+      return x;
+    }
+
+    const dt = Math.max(0.001, Math.min(0.5, (tMs - this.tPrev) / 1000.0));
+    this.tPrev = tMs;
+
+    const dx = (x - this.xPrev) / dt;
+    const edx = this.dxPrev + this._alpha(this.dCutoff, dt) * (dx - this.dxPrev);
+    this.dxPrev = edx;
+
+    const cutoff = this.minCutoff + this.beta * Math.abs(edx);
+    const a = this._alpha(cutoff, dt);
+    const xHat = this.xPrev + a * (x - this.xPrev);
+    this.xPrev = xHat;
+    return xHat;
+  }
+}
 
 class ArUcoPoseEstimator {
   constructor(options = {}) {
     this.markerSizeMeters = options.markerSizeMeters || 0.25; // Default 25cm
     this.fovDegrees = options.fovDegrees || 60.0;             // Standard webcam horizontal FOV
     this.gracePeriodMs = options.gracePeriodMs || 1500;       // Hold pose for 1.5s on occlusion
-    this.smoothAlpha = options.smoothAlpha || 0.35;           // EMA smoothing factor (0 = infinite lag, 1 = raw)
+    this.smoothAlpha = options.smoothAlpha || 0.35;           // Base smoothing factor
+
+    // 1-Euro Filters for 3D position (eliminates static jitter while keeping fast camera pans responsive)
+    this.posFilters = {
+      x: new OneEuroScalarFilter(0.8, 0.04, 1.0),
+      y: new OneEuroScalarFilter(0.8, 0.04, 1.0),
+      z: new OneEuroScalarFilter(0.8, 0.04, 1.0)
+    };
 
     // Current tracking state
     this.currentPose = null;       // { position: {x,y,z}, rotationQuaternion: {x,y,z,w}, rawMatrix, timestamp }
@@ -17,6 +69,7 @@ class ArUcoPoseEstimator {
     this.lastSeenTime = 0;
     this.activeMarkerCount = 0;
     this.primaryMarkerKey = null;
+    this.outlierCount = 0;
 
     // Lock Anchor Mode (allows walking around field with fixed 3D anchor)
     this.isAnchorLocked = false;
@@ -61,8 +114,12 @@ class ArUcoPoseEstimator {
     this.lastSeenTime = 0;
     this.activeMarkerCount = 0;
     this.primaryMarkerKey = null;
+    this.outlierCount = 0;
     this.isAnchorLocked = false;
     this.lockedPose = null;
+    this.posFilters.x.reset();
+    this.posFilters.y.reset();
+    this.posFilters.z.reset();
   }
 
   // --- DEVICE GYROSCOPE & SENSOR FUSION ---
@@ -160,37 +217,78 @@ class ArUcoPoseEstimator {
       for (const m of detectedMarkers) {
         const key = idToKeyMap[m.id];
         if (key && fieldCoords[key] && m.corners && m.corners.length === 4) {
-          validMarkers.push({
-            id: m.id,
-            key: key,
-            fieldPos: fieldCoords[key],
-            corners: m.corners,
-            center: m.center
-          });
+          // Calculate apparent pixel perimeter to weight larger/closer markers higher
+          let perimeter = 0;
+          for (let i = 0; i < 4; i++) {
+            const p1 = m.corners[i];
+            const p2 = m.corners[(i + 1) % 4];
+            perimeter += Math.hypot(p2.x - p1.x, p2.y - p1.y);
+          }
+          // Reject degenerate/tiny false detections (< 24px total perimeter)
+          if (perimeter >= 24) {
+            validMarkers.push({
+              id: m.id,
+              key: key,
+              fieldPos: fieldCoords[key],
+              corners: m.corners,
+              center: m.center,
+              perimeter: perimeter
+            });
+          }
         }
       }
     }
 
+    // Sort by apparent size descending so closest/clearest marker is primary
+    validMarkers.sort((a, b) => b.perimeter - a.perimeter);
     this.activeMarkerCount = validMarkers.length;
 
     // --- CASE 1: AT LEAST ONE MARKER DETECTED ---
     if (validMarkers.length > 0) {
-      this.lastSeenTime = now;
       let rawPose = null;
 
       if (validMarkers.length === 1) {
-        // Single-Marker Pose Estimation
         this.primaryMarkerKey = validMarkers[0].key;
         rawPose = this._estimateFromSingleMarker(validMarkers[0], K);
       } else {
-        // Multi-Marker Refinement Pose Estimation
         this.primaryMarkerKey = validMarkers.map(m => m.key).join('+');
         rawPose = this._estimateFromMultipleMarkers(validMarkers, K);
       }
 
-      if (rawPose) {
-        // Smooth pose with exponential moving average and quaternion SLERP
-        this.smoothedPose = this._smoothPose(rawPose, this.smoothedPose, this.smoothAlpha);
+      if (rawPose && this._isValidPose(rawPose)) {
+        // Outlier rejection: prevent single-frame PnP/homography flips from snapping the 3D scene
+        if (this.smoothedPose && (now - this.lastSeenTime < 500)) {
+          const posJump = Math.hypot(
+            rawPose.position.x - this.smoothedPose.position.x,
+            rawPose.position.y - this.smoothedPose.position.y,
+            rawPose.position.z - this.smoothedPose.position.z
+          );
+          const rotDot = Math.abs(
+            rawPose.rotationQuaternion.x * this.smoothedPose.rotationQuaternion.x +
+            rawPose.rotationQuaternion.y * this.smoothedPose.rotationQuaternion.y +
+            rawPose.rotationQuaternion.z * this.smoothedPose.rotationQuaternion.z +
+            rawPose.rotationQuaternion.w * this.smoothedPose.rotationQuaternion.w
+          );
+          const angleJumpDeg = 2 * Math.acos(Math.min(1.0, rotDot)) * (180 / Math.PI);
+
+          // If sudden jump > 12m or > 65 deg in a single frame, require 4 consecutive frames to accept
+          if ((posJump > 12.0 || angleJumpDeg > 65.0) && this.outlierCount < 4) {
+            this.outlierCount++;
+            return {
+              pose: this.smoothedPose,
+              status: 'holding',
+              markerCount: validMarkers.length,
+              primaryKey: this.primaryMarkerKey,
+              isLocked: false
+            };
+          }
+        }
+
+        this.outlierCount = 0;
+        this.lastSeenTime = now;
+
+        // Smooth pose with adaptive 1-Euro filter + dynamic quaternion SLERP
+        this.smoothedPose = this._smoothPose(rawPose, this.smoothedPose, now);
         this.currentPose = rawPose;
 
         return {
@@ -215,7 +313,12 @@ class ArUcoPoseEstimator {
       };
     }
 
-    // Tracking lost
+    // Tracking lost: reset filters so next acquisition snaps cleanly
+    this.posFilters.x.reset();
+    this.posFilters.y.reset();
+    this.posFilters.z.reset();
+    this.smoothedPose = null;
+
     return {
       pose: null,
       status: 'lost',
@@ -224,33 +327,56 @@ class ArUcoPoseEstimator {
     };
   }
 
+  _isValidPose(pose) {
+    if (!pose || !pose.position || !pose.rotationQuaternion) return false;
+    const p = pose.position;
+    const q = pose.rotationQuaternion;
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) return false;
+    if (!Number.isFinite(q.x) || !Number.isFinite(q.y) || !Number.isFinite(q.z) || !Number.isFinite(q.w)) return false;
+    const dist = Math.hypot(p.x, p.y, p.z);
+    return dist > 0.05 && dist < 250.0;
+  }
+
   // --- SINGLE-MARKER POSE CALCULATION ---
   _estimateFromSingleMarker(marker, K) {
     const s = this.markerSizeMeters;
     const s2 = s / 2;
 
-    // Local marker 4 corners on ground plane Y=0:
-    // Clockwise: 0: Top-Left, 1: Top-Right, 2: Bottom-Right, 3: Bottom-Left
-    // Local X right, Local Z forward (North)
-    const localCorners = [
-      { x: -s2, z:  s2 }, // c0: top-left
-      { x:  s2, z:  s2 }, // c1: top-right
-      { x:  s2, z: -s2 }, // c2: bottom-right
-      { x: -s2, z: -s2 }  // c3: bottom-left
-    ];
+    // 1. Primary Method: OpenCV solvePnP with IPPE_SQUARE (designed specifically for planar squares)
+    const cvDecomp = this._solvePnPOpenCV(
+      [
+        { x: -s2, y: 0, z:  s2 }, // c0: top-left
+        { x:  s2, y: 0, z:  s2 }, // c1: top-right
+        { x:  s2, y: 0, z: -s2 }, // c2: bottom-right
+        { x: -s2, y: 0, z: -s2 }  // c3: bottom-left
+      ],
+      marker.corners,
+      K,
+      true
+    );
 
-    // Compute 3x3 homography H mapping from local (X, Z, 1) to image (u, v, 1)
-    const H = this._computeHomography(localCorners, marker.corners);
-    if (!H) return null;
+    let R, T;
+    if (cvDecomp) {
+      R = cvDecomp.R;
+      T = cvDecomp.T;
+    } else {
+      // 2. Fallback: Hartley-Normalized Homography + Polar SVD Orthonormalization
+      const localCorners = [
+        { x: -s2, z:  s2 },
+        { x:  s2, z:  s2 },
+        { x:  s2, z: -s2 },
+        { x: -s2, z: -s2 }
+      ];
+      const H = this._computeNormalizedHomography(localCorners, marker.corners);
+      if (!H) return null;
 
-    // Decompose H into camera-space rotation matrix R and translation vector T
-    const decomp = this._decomposeHomography(H, K);
-    if (!decomp) return null;
-
-    const { R, T } = decomp;
+      const decomp = this._decomposeHomography(H, K, localCorners, marker.corners);
+      if (!decomp) return null;
+      R = decomp.R;
+      T = decomp.T;
+    }
 
     // Offset from marker position to full field origin (0,0,0):
-    // P_field = [X_f, 0, Z_f].
     // P_cam = R * (P_field - FieldPos_marker) + T_marker
     //       = R * P_field + (T_marker - R * FieldPos_marker)
     const F = marker.fieldPos; // { x, y: 0, z }
@@ -264,9 +390,6 @@ class ArUcoPoseEstimator {
       z: T.z - RFz
     };
 
-    // Convert OpenCV camera coordinate frame to Babylon.js coordinate frame:
-    // OpenCV: +X right, +Y down, +Z forward
-    // Babylon: +X right, +Y up, +Z forward (left-handed)
     return this._convertCvToBabylon(R, T_field_cv);
   }
 
@@ -275,97 +398,207 @@ class ArUcoPoseEstimator {
     const s = this.markerSizeMeters;
     const s2 = s / 2;
 
+    const objPts3D = [];
     const groundPoints = [];
     const imagePoints = [];
 
-    // Collect all corners across all visible markers in global field space
     for (const m of markers) {
       const F = m.fieldPos;
       const cornerFieldPositions = [
-        { x: F.x - s2, z: F.z + s2 }, // c0
-        { x: F.x + s2, z: F.z + s2 }, // c1
-        { x: F.x + s2, z: F.z - s2 }, // c2
-        { x: F.x - s2, z: F.z - s2 }  // c3
+        { x: F.x - s2, y: 0, z: F.z + s2 }, // c0
+        { x: F.x + s2, y: 0, z: F.z + s2 }, // c1
+        { x: F.x + s2, y: 0, z: F.z - s2 }, // c2
+        { x: F.x - s2, y: 0, z: F.z - s2 }  // c3
       ];
 
       for (let i = 0; i < 4; i++) {
-        groundPoints.push(cornerFieldPositions[i]);
+        objPts3D.push(cornerFieldPositions[i]);
+        groundPoints.push({ x: cornerFieldPositions[i].x, z: cornerFieldPositions[i].z });
         imagePoints.push(m.corners[i]);
       }
     }
 
-    // Compute global field ground-plane homography H using all 4N correspondences
-    const H = this._computeHomographyMulti(groundPoints, imagePoints);
+    // 1. Primary Method: OpenCV Multi-Point PnP (SQPNP / ITERATIVE)
+    const cvDecomp = this._solvePnPOpenCV(objPts3D, imagePoints, K, false);
+    if (cvDecomp) {
+      return this._convertCvToBabylon(cvDecomp.R, cvDecomp.T);
+    }
+
+    // 2. Fallback: Hartley-Normalized Multi-Point Homography + Polar Orthonormalization
+    const H = this._computeNormalizedHomography(groundPoints, imagePoints);
     if (!H) {
-      // Fallback to single marker if multi-point solve fails
       return this._estimateFromSingleMarker(markers[0], K);
     }
 
-    const decomp = this._decomposeHomography(H, K);
+    const decomp = this._decomposeHomography(H, K, groundPoints, imagePoints);
     if (!decomp) {
       return this._estimateFromSingleMarker(markers[0], K);
     }
 
-    // With groundPoints already in field space, decomp gives field pose directly!
     return this._convertCvToBabylon(decomp.R, decomp.T);
   }
 
-  // --- HOMOGRAPHY SOLVER (4 POINTS) ---
-  _computeHomography(srcPts, dstPts) {
-    // 8x8 system: A * h = B, where h = [h11, h12, h13, h21, h22, h23, h31, h32]^T and h33 = 1
-    const A = [];
-    const B = [];
-
-    for (let i = 0; i < 4; i++) {
-      const X = srcPts[i].x;
-      const Z = srcPts[i].z;
-      const u = dstPts[i].x;
-      const v = dstPts[i].y;
-
-      A.push([X, Z, 1, 0, 0, 0, -u * X, -u * Z]);
-      B.push(u);
-
-      A.push([0, 0, 0, X, Z, 1, -v * X, -v * Z]);
-      B.push(v);
+  // --- OPENCV.JS SOLVEPNP + RODRIGUES (WITH NORMAL ORIENTATION ENFORCEMENT) ---
+  _solvePnPOpenCV(objPts3D, imgPts2D, K, isSingleSquare) {
+    if (typeof cv === 'undefined' || typeof cv.solvePnP !== 'function' || typeof cv.Rodrigues !== 'function') {
+      return null;
     }
 
-    const h = this._solveLinearSystem(A, B);
-    if (!h) return null;
+    let objMat = null, imgMat = null, camMat = null, distCoeffs = null, rvec = null, tvec = null, RMat = null;
+    try {
+      const N = objPts3D.length;
 
-    return [
-      [h[0], h[1], h[2]],
-      [h[3], h[4], h[5]],
-      [h[6], h[7], 1.0]
-    ];
+      if (isSingleSquare && N === 4 && typeof cv.SOLVEPNP_IPPE_SQUARE !== 'undefined') {
+        // IPPE_SQUARE expects 4 corners in marker plane: [-s/2, s/2, 0], [s/2, s/2, 0], [s/2, -s/2, 0], [-s/2, -s/2, 0]
+        const s2 = this.markerSizeMeters / 2;
+        objMat = cv.matFromArray(4, 1, cv.CV_32FC3, [
+          -s2,  s2, 0,
+           s2,  s2, 0,
+           s2, -s2, 0,
+          -s2, -s2, 0
+        ]);
+      } else {
+        const flatObj = [];
+        for (let i = 0; i < N; i++) {
+          flatObj.push(objPts3D[i].x, objPts3D[i].y || 0, objPts3D[i].z);
+        }
+        objMat = cv.matFromArray(N, 1, cv.CV_32FC3, flatObj);
+      }
+
+      const flatImg = [];
+      for (let i = 0; i < N; i++) {
+        flatImg.push(imgPts2D[i].x, imgPts2D[i].y);
+      }
+      imgMat = cv.matFromArray(N, 1, cv.CV_32FC2, flatImg);
+
+      camMat = cv.matFromArray(3, 3, cv.CV_64F, [
+        K.fx, 0,    K.cx,
+        0,    K.fy, K.cy,
+        0,    0,    1
+      ]);
+      distCoeffs = cv.Mat.zeros(4, 1, cv.CV_64F);
+      rvec = new cv.Mat();
+      tvec = new cv.Mat();
+      RMat = new cv.Mat();
+
+      let flag = cv.SOLVEPNP_ITERATIVE || 0;
+      if (isSingleSquare && N === 4 && typeof cv.SOLVEPNP_IPPE_SQUARE !== 'undefined') {
+        flag = cv.SOLVEPNP_IPPE_SQUARE;
+      } else if (!isSingleSquare && typeof cv.SOLVEPNP_SQPNP !== 'undefined') {
+        flag = cv.SOLVEPNP_SQPNP;
+      }
+
+      const ok = cv.solvePnP(objMat, imgMat, camMat, distCoeffs, rvec, tvec, false, flag);
+      if (!ok) return null;
+
+      cv.Rodrigues(rvec, RMat);
+      const rData = RMat.data64F || RMat.data32F;
+      const tData = tvec.data64F || tvec.data32F;
+      if (!rData || !tData) return null;
+
+      let R;
+      if (isSingleSquare && N === 4 && flag === cv.SOLVEPNP_IPPE_SQUARE) {
+        // Map IPPE_SQUARE plane (X_ippe = X_field, Y_ippe = Z_field, Z_ippe = -Y_field) to Field (X, Y_up, Z_north):
+        // Column 0 (X_field) = col 0 of R_ippe
+        // Column 1 (Y_field) = -col 2 of R_ippe
+        // Column 2 (Z_field) = col 1 of R_ippe
+        R = [
+          [rData[0], -rData[2], rData[1]],
+          [rData[3], -rData[5], rData[4]],
+          [rData[6], -rData[8], rData[7]]
+        ];
+      } else {
+        R = [
+          [rData[0], rData[1], rData[2]],
+          [rData[3], rData[4], rData[5]],
+          [rData[6], rData[7], rData[8]]
+        ];
+      }
+
+      const T = {
+        x: tData[0],
+        y: tData[1],
+        z: tData[2]
+      };
+
+      // Verify marker is in front of camera
+      if (T.z <= 0.05) return null;
+
+      // Verify camera is above the agility ground plane (prevents planar tilt ambiguity flip)
+      // Camera position in field frame: C_field = -R^T * T. Its Y coordinate is -(R[0][1]*T.x + R[1][1]*T.y + R[2][1]*T.z)
+      const camFieldY = -(R[0][1] * T.x + R[1][1] * T.y + R[2][1] * T.z);
+      if (camFieldY < -0.1) {
+        return null; // Reject flipped underground solution so normalized homography with normal check handles it
+      }
+
+      return { R, T };
+    } catch (e) {
+      return null;
+    } finally {
+      if (objMat) objMat.delete();
+      if (imgMat) imgMat.delete();
+      if (camMat) camMat.delete();
+      if (distCoeffs) distCoeffs.delete();
+      if (rvec) rvec.delete();
+      if (tvec) tvec.delete();
+      if (RMat) RMat.delete();
+    }
   }
 
-  // --- MULTI-POINT HOMOGRAPHY (NORMAL EQUATIONS) ---
-  _computeHomographyMulti(srcPts, dstPts) {
+  // --- HARTLEY-NORMALIZED HOMOGRAPHY SOLVER (4 OR MORE POINTS) ---
+  /**
+   * Normalizes both 2D ground coordinates and 2D image pixel coordinates (centroid at origin, mean distance = sqrt(2))
+   * before solving DLT normal equations, eliminating floating-point ill-conditioning across large fields.
+   */
+  _computeNormalizedHomography(srcPts, dstPts) {
     const N = srcPts.length;
+    if (N < 4) return null;
+
+    // 1. Compute centroids
+    let srcCx = 0, srcCz = 0, dstCx = 0, dstCy = 0;
+    for (let i = 0; i < N; i++) {
+      srcCx += srcPts[i].x;
+      srcCz += srcPts[i].z;
+      dstCx += dstPts[i].x;
+      dstCy += dstPts[i].y;
+    }
+    srcCx /= N; srcCz /= N;
+    dstCx /= N; dstCy /= N;
+
+    // 2. Compute mean distances from centroid
+    let srcMeanDist = 0, dstMeanDist = 0;
+    for (let i = 0; i < N; i++) {
+      srcMeanDist += Math.hypot(srcPts[i].x - srcCx, srcPts[i].z - srcCz);
+      dstMeanDist += Math.hypot(dstPts[i].x - dstCx, dstPts[i].y - dstCy);
+    }
+    srcMeanDist /= N;
+    dstMeanDist /= N;
+    if (srcMeanDist < 1e-8 || dstMeanDist < 1e-8) return null;
+
+    const srcScale = Math.SQRT2 / srcMeanDist;
+    const dstScale = Math.SQRT2 / dstMeanDist;
+
+    // 3. Build normalized system (AtA * h = AtB)
     const AtA = Array.from({ length: 8 }, () => new Float64Array(8));
     const AtB = new Float64Array(8);
 
     for (let i = 0; i < N; i++) {
-      const X = srcPts[i].x;
-      const Z = srcPts[i].z;
-      const u = dstPts[i].x;
-      const v = dstPts[i].y;
+      const X = (srcPts[i].x - srcCx) * srcScale;
+      const Z = (srcPts[i].z - srcCz) * srcScale;
+      const u = (dstPts[i].x - dstCx) * dstScale;
+      const v = (dstPts[i].y - dstCy) * dstScale;
 
-      // Row 1
       const r1 = [X, Z, 1, 0, 0, 0, -u * X, -u * Z];
-      const b1 = u;
       for (let j = 0; j < 8; j++) {
-        AtB[j] += r1[j] * b1;
+        AtB[j] += r1[j] * u;
         for (let k = 0; k < 8; k++) {
           AtA[j][k] += r1[j] * r1[k];
         }
       }
 
-      // Row 2
       const r2 = [0, 0, 0, X, Z, 1, -v * X, -v * Z];
-      const b2 = v;
       for (let j = 0; j < 8; j++) {
-        AtB[j] += r2[j] * b2;
+        AtB[j] += r2[j] * v;
         for (let k = 0; k < 8; k++) {
           AtA[j][k] += r2[j] * r2[k];
         }
@@ -378,77 +611,125 @@ class ArUcoPoseEstimator {
     const h = this._solveLinearSystem(AtA_mat, AtB_arr);
     if (!h) return null;
 
-    return [
+    const H_norm = [
       [h[0], h[1], h[2]],
       [h[3], h[4], h[5]],
       [h[6], h[7], 1.0]
     ];
+
+    // 4. Denormalize: H = T_dst^-1 * H_norm * T_src
+    // T_src = [ [srcScale, 0, -srcScale*srcCx], [0, srcScale, -srcScale*srcCz], [0, 0, 1] ]
+    // T_dst^-1 = [ [1/dstScale, 0, dstCx], [0, 1/dstScale, dstCy], [0, 0, 1] ]
+    const T_src = [
+      [srcScale, 0, -srcScale * srcCx],
+      [0, srcScale, -srcScale * srcCz],
+      [0, 0, 1]
+    ];
+    const T_dst_inv = [
+      [1 / dstScale, 0, dstCx],
+      [0, 1 / dstScale, dstCy],
+      [0, 0, 1]
+    ];
+
+    const H_temp = this._matMul3x3(H_norm, T_src);
+    return this._matMul3x3(T_dst_inv, H_temp);
   }
 
-  // --- HOMOGRAPHY DECOMPOSITION (ZHANG / FAUGERAS) ---
-  _decomposeHomography(H, K) {
+  _matMul3x3(A, B) {
+    const C = [
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0]
+    ];
+    for (let i = 0; i < 3; i++) {
+      for (let j = 0; j < 3; j++) {
+        C[i][j] = A[i][0] * B[0][j] + A[i][1] * B[1][j] + A[i][2] * B[2][j];
+      }
+    }
+    return C;
+  }
+
+  // --- HOMOGRAPHY DECOMPOSITION WITH POLAR SVD ORTHONORMALIZATION ---
+  _decomposeHomography(H, K, srcPts, dstPts) {
     const fx = K.fx;
     const fy = K.fy;
     const cx = K.cx;
     const cy = K.cy;
 
     // Normalized homography: H_tilde = K^-1 * H
-    // K^-1 * [h1, h2, h3]
     const H_tilde = [
-      [ (H[0][0] - cx * H[2][0]) / fx, (H[0][1] - cx * H[2][1]) / fx, (H[0][2] - cx * H[2][2]) / fx ],
-      [ (H[1][0] - cy * H[2][0]) / fy, (H[1][1] - cy * H[2][1]) / fy, (H[1][2] - cy * H[2][2]) / fy ],
-      [ H[2][0],                       H[2][1],                       H[2][2] ]
+      [(H[0][0] - cx * H[2][0]) / fx, (H[0][1] - cx * H[2][1]) / fx, (H[0][2] - cx * H[2][2]) / fx],
+      [(H[1][0] - cy * H[2][0]) / fy, (H[1][1] - cy * H[2][1]) / fy, (H[1][2] - cy * H[2][2]) / fy],
+      [H[2][0],                       H[2][1],                       H[2][2]]
     ];
 
     const h1 = [H_tilde[0][0], H_tilde[1][0], H_tilde[2][0]];
     const h2 = [H_tilde[0][1], H_tilde[1][1], H_tilde[2][1]];
     const h3 = [H_tilde[0][2], H_tilde[1][2], H_tilde[2][2]];
 
-    const norm1 = Math.sqrt(h1[0] * h1[0] + h1[1] * h1[1] + h1[2] * h1[2]);
-    const norm2 = Math.sqrt(h2[0] * h2[0] + h2[1] * h2[1] + h2[2] * h2[2]);
+    const norm1 = Math.hypot(h1[0], h1[1], h1[2]);
+    const norm2 = Math.hypot(h2[0], h2[1], h2[2]);
     if (norm1 < 1e-7 || norm2 < 1e-7) return null;
 
-    let lambda = 2.0 / (norm1 + norm2);
-    // In camera coordinates, translation Z must be positive (in front of camera)
-    if (h3[2] < 0) {
+    // Geometric mean scale factor
+    let lambda = 1.0 / Math.sqrt(norm1 * norm2);
+
+    // Determine sign of lambda using actual visible marker centroid (not origin, which may be behind camera!)
+    if (srcPts && srcPts.length > 0) {
+      let cxSrc = 0, czSrc = 0;
+      for (let i = 0; i < srcPts.length; i++) {
+        cxSrc += srcPts[i].x;
+        czSrc += srcPts[i].z;
+      }
+      cxSrc /= srcPts.length;
+      czSrc /= srcPts.length;
+      const zCam = h1[2] * cxSrc + h2[2] * czSrc + h3[2];
+      if (zCam * lambda < 0) {
+        lambda = -lambda;
+      }
+    } else if (h3[2] < 0) {
       lambda = -lambda;
     }
 
-    // Local X axis (East) in camera space
-    let r1 = [lambda * h1[0], lambda * h1[1], lambda * h1[2]];
-    // Local Z axis (North) in camera space
-    let r3 = [lambda * h2[0], lambda * h2[1], lambda * h2[2]];
-    // Translation
+    // Symmetric polar orthonormalization of [r1, r3] (treats X and Z axes equally instead of biasing X via Gram-Schmidt)
+    const u1 = [h1[0] / norm1 * Math.sign(lambda), h1[1] / norm1 * Math.sign(lambda), h1[2] / norm1 * Math.sign(lambda)];
+    const u3 = [h2[0] / norm2 * Math.sign(lambda), h2[1] / norm2 * Math.sign(lambda), h2[2] / norm2 * Math.sign(lambda)];
+
+    // Sum and difference bisectors of u1 and u3
+    const sPlus = [u1[0] + u3[0], u1[1] + u3[1], u1[2] + u3[2]];
+    const sMinus = [u1[0] - u3[0], u1[1] - u3[1], u1[2] - u3[2]];
+    const lenPlus = Math.hypot(sPlus[0], sPlus[1], sPlus[2]);
+    const lenMinus = Math.hypot(sMinus[0], sMinus[1], sMinus[2]);
+    if (lenPlus < 1e-7 || lenMinus < 1e-7) return null;
+
+    const ePlus = [sPlus[0] / lenPlus, sPlus[1] / lenPlus, sPlus[2] / lenPlus];
+    const eMinus = [sMinus[0] / lenMinus, sMinus[1] / lenMinus, sMinus[2] / lenMinus];
+
+    const invSqrt2 = Math.SQRT1_2;
+    const r1 = [
+      (ePlus[0] + eMinus[0]) * invSqrt2,
+      (ePlus[1] + eMinus[1]) * invSqrt2,
+      (ePlus[2] + eMinus[2]) * invSqrt2
+    ];
+    const r3 = [
+      (ePlus[0] - eMinus[0]) * invSqrt2,
+      (ePlus[1] - eMinus[1]) * invSqrt2,
+      (ePlus[2] - eMinus[2]) * invSqrt2
+    ];
+
+    // r2 = r3 x r1 (Up axis +Y of field in OpenCV camera space)
+    const r2 = [
+      r3[1] * r1[2] - r3[2] * r1[1],
+      r3[2] * r1[0] - r3[0] * r1[2],
+      r3[0] * r1[1] - r3[1] * r1[0]
+    ];
+
     const T = {
       x: lambda * h3[0],
       y: lambda * h3[1],
       z: lambda * h3[2]
     };
 
-    // r2 = r3 x r1 (Normal to ground, -Y in OpenCV convention)
-    let r2 = [
-      r3[1] * r1[2] - r3[2] * r1[1],
-      r3[2] * r1[0] - r3[0] * r1[2],
-      r3[0] * r1[1] - r3[1] * r1[0]
-    ];
-
-    // Orthonormalize rotation matrix using Gram-Schmidt:
-    const len1 = Math.sqrt(r1[0] * r1[0] + r1[1] * r1[1] + r1[2] * r1[2]);
-    r1 = [r1[0] / len1, r1[1] / len1, r1[2] / len1];
-
-    const dot12 = r2[0] * r1[0] + r2[1] * r1[1] + r2[2] * r1[2];
-    r2 = [r2[0] - dot12 * r1[0], r2[1] - dot12 * r1[1], r2[2] - dot12 * r1[2]];
-    const len2 = Math.sqrt(r2[0] * r2[0] + r2[1] * r2[1] + r2[2] * r2[2]);
-    r2 = [r2[0] / len2, r2[1] / len2, r2[2] / len2];
-
-    // Ensure right-handed rotation: r3 = r1 x r2
-    r3 = [
-      r1[1] * r2[2] - r1[2] * r2[1],
-      r1[2] * r2[0] - r1[0] * r2[2],
-      r1[0] * r2[1] - r1[1] * r2[0]
-    ];
-
-    // 3x3 Rotation matrix R (columns are r1, r2, r3)
     const R = [
       [r1[0], r2[0], r3[0]],
       [r1[1], r2[1], r3[1]],
@@ -462,18 +743,17 @@ class ArUcoPoseEstimator {
   _convertCvToBabylon(R_cv, T_cv) {
     // OpenCV: +X right, +Y down, +Z forward
     // Babylon: +X right, +Y up, +Z forward
-    // Invert Y in translation
     const posBabylon = {
       x: T_cv.x,
       y: -T_cv.y,
       z: T_cv.z
     };
 
-    // For rotation, invert Y row and Y column: R_bab = S * R_cv * S with S = diag(1, -1, 1)
+    // Invert Y row and Y column: R_bab = S * R_cv * S with S = diag(1, -1, 1)
     const R_bab = [
-      [ R_cv[0][0], -R_cv[0][1],  R_cv[0][2] ],
-      [-R_cv[1][0],  R_cv[1][1], -R_cv[1][2] ],
-      [ R_cv[2][0], -R_cv[2][1],  R_cv[2][2] ]
+      [ R_cv[0][0], -R_cv[0][1],  R_cv[0][2]],
+      [-R_cv[1][0],  R_cv[1][1], -R_cv[1][2]],
+      [ R_cv[2][0], -R_cv[2][1],  R_cv[2][2]]
     ];
 
     const q = this._quaternionFromMatrix(R_bab);
@@ -487,6 +767,12 @@ class ArUcoPoseEstimator {
   }
 
   // --- ROTATION MATRIX TO QUATERNION ---
+  /**
+   * Converts a 3x3 column-vector rotation matrix into a Babylon.js Quaternion.
+   * Note: Babylon.js uses row-major vector multiplication (v' = v * M) where M = R^T,
+   * so we negate the vector part (x, y, z) of the column-major quaternion formula so that
+   * transformNode.rotationQuaternion produces the exact column-vector rotation R_bab * P!
+   */
   _quaternionFromMatrix(m) {
     const m00 = m[0][0], m01 = m[0][1], m02 = m[0][2];
     const m10 = m[1][0], m11 = m[1][1], m12 = m[1][2];
@@ -497,51 +783,63 @@ class ArUcoPoseEstimator {
     if (tr > 0) {
       const S = Math.sqrt(tr + 1.0) * 2;
       w = 0.25 * S;
-      x = (m21 - m12) / S;
-      y = (m02 - m20) / S;
-      z = (m10 - m01) / S;
+      x = (m12 - m21) / S;
+      y = (m20 - m02) / S;
+      z = (m01 - m10) / S;
     } else if ((m00 > m11) && (m00 > m22)) {
       const S = Math.sqrt(1.0 + m00 - m11 - m22) * 2;
-      w = (m21 - m12) / S;
-      x = 0.25 * S;
-      y = (m01 + m10) / S;
-      z = (m02 + m20) / S;
+      w = (m12 - m21) / S;
+      x = -0.25 * S;
+      y = -(m01 + m10) / S;
+      z = -(m02 + m20) / S;
     } else if (m11 > m22) {
       const S = Math.sqrt(1.0 + m11 - m00 - m22) * 2;
-      w = (m02 - m20) / S;
-      x = (m01 + m10) / S;
-      y = 0.25 * S;
-      z = (m12 + m21) / S;
+      w = (m20 - m02) / S;
+      x = -(m01 + m10) / S;
+      y = -0.25 * S;
+      z = -(m12 + m21) / S;
     } else {
       const S = Math.sqrt(1.0 + m22 - m00 - m11) * 2;
-      w = (m10 - m01) / S;
-      x = (m02 + m20) / S;
-      y = (m12 + m21) / S;
-      z = 0.25 * S;
+      w = (m01 - m10) / S;
+      x = -(m02 + m20) / S;
+      y = -(m12 + m21) / S;
+      z = -0.25 * S;
     }
 
-    const len = Math.sqrt(x * x + y * y + z * z + w * w);
+    const len = Math.hypot(x, y, z, w) || 1.0;
     return { x: x / len, y: y / len, z: z / len, w: w / len };
   }
 
-  // --- TEMPORAL SMOOTHING (EMA & QUATERNION SLERP) ---
-  _smoothPose(newPose, prevPose, alpha) {
-    if (!prevPose) return newPose;
-
-    // Linear interpolation for translation
+  // --- TEMPORAL SMOOTHING (1-EURO POSITION FILTER & ADAPTIVE QUATERNION SLERP) ---
+  _smoothPose(newPose, prevPose, nowMs) {
+    const t = nowMs || Date.now();
     const pos = {
-      x: prevPose.position.x * (1 - alpha) + newPose.position.x * alpha,
-      y: prevPose.position.y * (1 - alpha) + newPose.position.y * alpha,
-      z: prevPose.position.z * (1 - alpha) + newPose.position.z * alpha
+      x: this.posFilters.x.filter(newPose.position.x, t),
+      y: this.posFilters.y.filter(newPose.position.y, t),
+      z: this.posFilters.z.filter(newPose.position.z, t)
     };
 
-    // Spherical Linear Interpolation (SLERP) for rotation
-    const rot = this._quaternionSlerp(prevPose.rotationQuaternion, newPose.rotationQuaternion, alpha);
+    if (!prevPose) {
+      return {
+        position: pos,
+        rotationQuaternion: { ...newPose.rotationQuaternion },
+        timestamp: t
+      };
+    }
+
+    // Adaptive SLERP factor based on angular velocity (eliminates micro-jitter at rest, tracks fast turns)
+    const qa = prevPose.rotationQuaternion;
+    const qb = newPose.rotationQuaternion;
+    const dot = Math.abs(qa.w * qb.w + qa.x * qb.x + qa.y * qb.y + qa.z * qb.z);
+    const angleRad = 2 * Math.acos(Math.min(1.0, dot));
+    const adaptiveAlpha = Math.min(0.75, Math.max(0.12, this.smoothAlpha * (0.4 + angleRad * 3.5)));
+
+    const rot = this._quaternionSlerp(qa, qb, adaptiveAlpha);
 
     return {
       position: pos,
       rotationQuaternion: rot,
-      timestamp: Date.now()
+      timestamp: t
     };
   }
 
@@ -562,22 +860,28 @@ class ArUcoPoseEstimator {
     const sinHalfTheta = Math.sqrt(1.0 - cosHalfTheta * cosHalfTheta);
 
     if (Math.abs(sinHalfTheta) < 0.001) {
-      return {
-        x: qa.x * (1 - t) + bx * t,
-        y: qa.y * (1 - t) + by * t,
-        z: qa.z * (1 - t) + bz * t,
-        w: qa.w * (1 - t) + bw * t
-      };
+      const rx = qa.x * (1 - t) + bx * t;
+      const ry = qa.y * (1 - t) + by * t;
+      const rz = qa.z * (1 - t) + bz * t;
+      const rw = qa.w * (1 - t) + bw * t;
+      const len = Math.hypot(rx, ry, rz, rw) || 1.0;
+      return { x: rx / len, y: ry / len, z: rz / len, w: rw / len };
     }
 
     const ratioA = Math.sin((1 - t) * halfTheta) / sinHalfTheta;
     const ratioB = Math.sin(t * halfTheta) / sinHalfTheta;
 
+    const rx = qa.x * ratioA + bx * ratioB;
+    const ry = qa.y * ratioA + by * ratioB;
+    const rz = qa.z * ratioA + bz * ratioB;
+    const rw = qa.w * ratioA + bw * ratioB;
+    const len = Math.hypot(rx, ry, rz, rw) || 1.0;
+
     return {
-      x: qa.x * ratioA + bx * ratioB,
-      y: qa.y * ratioA + by * ratioB,
-      z: qa.z * ratioA + bz * ratioB,
-      w: qa.w * ratioA + bw * ratioB
+      x: rx / len,
+      y: ry / len,
+      z: rz / len,
+      w: rw / len
     };
   }
 
