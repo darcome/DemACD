@@ -64,12 +64,13 @@ class BabylonEngine {
   _initScene() {
     try {
       if (this.mode === 'ar') {
-        // Transparent AR Engine & Scene
+        // Transparent AR Engine & Scene (use exact 1:1 buffer dimensions to match OpenCV canvas)
         this.engine = new BABYLON.Engine(this.canvas, true, {
           preserveDrawingBuffer: true,
           stencil: true,
           alpha: true
-        });
+        }, false);
+        this.engine.setHardwareScalingLevel(1.0);
         this.scene = new BABYLON.Scene(this.engine);
         this.scene.clearColor = new BABYLON.Color4(0.0, 0.0, 0.0, 0.0); // Fully transparent
 
@@ -154,7 +155,18 @@ class BabylonEngine {
 
   resize() {
     if (this.engine) {
-      this.engine.resize();
+      if (this.mode === 'ar') {
+        const outCanvas = document.getElementById('outputCanvas');
+        if (outCanvas && outCanvas.width > 0 && outCanvas.height > 0) {
+          this.canvas.width = outCanvas.width;
+          this.canvas.height = outCanvas.height;
+          this.engine.setSize(outCanvas.width, outCanvas.height, true);
+        } else {
+          this.engine.resize();
+        }
+      } else {
+        this.engine.resize();
+      }
       if (this.scene) {
         this.scene.render();
       }
@@ -223,7 +235,7 @@ class BabylonEngine {
   }
 
   updateCameraFov(width, height, fovDegrees = 60.0) {
-    if (!this.camera || this.mode !== 'ar') return;
+    if (!this.camera || this.mode !== 'ar' || !width || !height) return;
     const fovRad = (fovDegrees * Math.PI) / 180;
     const fx = (width / 2) / Math.tan(fovRad / 2);
     const fovY = 2 * Math.atan((height / 2) / fx);
@@ -232,6 +244,14 @@ class BabylonEngine {
 
   alignWithMarkers(detectedMarkers, field, videoWidth, videoHeight, idToKeyMap) {
     if (!window.arucoPoseEstimator || this.mode !== 'ar') return null;
+
+    if (this.canvas && videoWidth > 0 && videoHeight > 0) {
+      if (this.engine && (this.engine.getRenderWidth() !== videoWidth || this.engine.getRenderHeight() !== videoHeight)) {
+        this.canvas.width = videoWidth;
+        this.canvas.height = videoHeight;
+        this.engine.setSize(videoWidth, videoHeight, true);
+      }
+    }
 
     this.updateCameraFov(videoWidth, videoHeight, window.arucoPoseEstimator.fovDegrees);
 
@@ -247,6 +267,10 @@ class BabylonEngine {
       this.setCoursePose(result.pose);
     } else if (result && result.status === 'lost') {
       this.setCourseVisible(false);
+    }
+
+    if (this.scene) {
+      this.scene.render();
     }
 
     return result;
