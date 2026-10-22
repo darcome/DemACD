@@ -234,12 +234,10 @@ class BabylonEngine {
     }
   }
 
-  updateCameraFov(width, height, fovDegrees = 60.0) {
-    if (!this.camera || this.mode !== 'ar' || !width || !height) return;
-    const fovRad = (fovDegrees * Math.PI) / 180;
-    const fx = (width / 2) / Math.tan(fovRad / 2);
-    const fovY = 2 * Math.atan((height / 2) / fx);
-    this.camera.fov = fovY;
+  updateCameraFov(width, height) {
+    if (!this.camera || this.mode !== 'ar' || !width || !height || !window.arucoPoseEstimator) return;
+    // Must use exactly the intrinsics the pose solver used, or the overlay drifts away from the markers
+    this.camera.fov = window.arucoPoseEstimator.getVerticalFov(width, height);
   }
 
   alignWithMarkers(detectedMarkers, field, videoWidth, videoHeight, idToKeyMap) {
@@ -253,7 +251,7 @@ class BabylonEngine {
       }
     }
 
-    this.updateCameraFov(videoWidth, videoHeight, window.arucoPoseEstimator.fovDegrees);
+    this.updateCameraFov(videoWidth, videoHeight);
 
     const result = window.arucoPoseEstimator.estimatePose(
       detectedMarkers,
