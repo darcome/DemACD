@@ -552,6 +552,10 @@ class ArUcoTrackerUI {
     if (sizeInput) {
       sizeInput.value = this.markerSizeMeters || 0.25;
     }
+    const fovInput = document.getElementById('input-aruco-fov');
+    if (fovInput && window.arucoPoseEstimator) {
+      fovInput.value = window.arucoPoseEstimator.fovDegrees;
+    }
 
     const list = document.getElementById('aruco-settings-inputs');
     if (list) {
@@ -598,6 +602,12 @@ class ArUcoTrackerUI {
               window.arucoPoseEstimator.setMarkerSize(sizeVal);
             }
           }
+        }
+
+        // Save camera field of view
+        const fovInput = document.getElementById('input-aruco-fov');
+        if (fovInput && window.arucoPoseEstimator) {
+          window.arucoPoseEstimator.setFov(fovInput.value);
         }
 
         // Save marker IDs

@@ -379,6 +379,20 @@
               <span style="font-size: 12px; color: var(--text-muted); font-weight: 600;">m</span>
             </div>
           </div>
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px;">
+            <div>
+              <label style="font-size: 13px; font-weight: 600; color: var(--text-main); display: block;">
+                <i class="fa-solid fa-camera" style="color: var(--accent-blue);"></i> Camera Field of View
+              </label>
+              <span style="font-size: 11px; color: var(--text-dim); display: block; margin-top: 2px;">
+                Angle across the longer side of the video (phones ~65&deg;, webcams ~60-70&deg;). Tune it if the 3D course drifts away from the markers.
+              </span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <input type="number" step="1" min="20" max="150" class="app-input" id="input-aruco-fov" value="65" style="width: 75px; text-align: center;">
+              <span style="font-size: 12px; color: var(--text-muted); font-weight: 600;">&deg;</span>
+            </div>
+          </div>
         </div>
 
         <div style="font-size: 12px; color: var(--text-dim); line-height: 1.4;">
