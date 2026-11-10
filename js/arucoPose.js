@@ -254,6 +254,7 @@
   function residuals(st, obs, f, model) {
     const R = st.R, t = st.t, half = st.size / 2;
     const upright = model.upright;
+    const fs = st.fs || 1;
     const out = new Float64Array(obs.length * 8 + (model.camWeight ? 2 : 0));
     for (let k = 0; k < obs.length; k++) {
       const o = obs[k];
@@ -274,8 +275,9 @@
         }
         const z = R[6] * X + R[7] * Y + R[8] * Z + t[2];
         if (!(z > 1e-6)) return null;
-        out[k * 8 + j * 2] = f * ((R[0] * X + R[1] * Y + R[2] * Z + t[0]) / z - o.img[j][0]);
-        out[k * 8 + j * 2 + 1] = f * ((R[3] * X + R[4] * Y + R[5] * Z + t[1]) / z - o.img[j][1]);
+        // st.fs rescales the focal length (1 = the focal length the corners were normalized with)
+        out[k * 8 + j * 2] = f * (fs * (R[0] * X + R[1] * Y + R[2] * Z + t[0]) / z - o.img[j][0]);
+        out[k * 8 + j * 2 + 1] = f * (fs * (R[3] * X + R[4] * Y + R[5] * Z + t[1]) / z - o.img[j][1]);
       }
     }
     if (model.camWeight) {
@@ -308,20 +310,23 @@
 
   /**
    * Refines a starting state. The camera pose is always optimized; with freeExtras the turn of every
-   * marker on the ground and the common marker size are optimized too.
+   * marker on the ground and the common marker size are optimized too, and with model.freeFocal the
+   * camera focal length as well (st.fs, a factor on the focal length f).
    */
   function refine(start, obs, f, freeExtras, model, maxIter) {
     const n = obs.length;
-    const nP = 6 + (freeExtras ? n + 1 : 0);
+    const iF = 6 + (freeExtras ? n + 1 : 0);
+    const nP = iF + (model.freeFocal ? 1 : 0);
 
     const apply = (st, d) => ({
       R: orthonormalize(mul(expSO3([d[0], d[1], d[2]]), st.R)),
       t: [st.t[0] + d[3], st.t[1] + d[4], st.t[2] + d[5]],
       yaws: freeExtras ? st.yaws.map((y, i) => y + d[6 + i]) : st.yaws,
-      size: freeExtras ? st.size * Math.exp(d[6 + n]) : st.size
+      size: freeExtras ? st.size * Math.exp(d[6 + n]) : st.size,
+      fs: model.freeFocal ? st.fs * Math.exp(d[iF]) : st.fs
     });
 
-    let st = { R: start.R, t: start.t, yaws: start.yaws, size: start.size };
+    let st = { R: start.R, t: start.t, yaws: start.yaws, size: start.size, fs: start.fs || 1 };
     let r = residuals(st, obs, f, model);
     if (!r) return null;
     let cost = robustCost(r);
@@ -487,13 +492,17 @@
       this.rotMinCutoff = 1.0; this.rotBeta = 0.05;  // per deg/s
       this.posMinCutoff = 2.0; this.posBeta = 0.03;  // per px/s
 
+      this.autoFov = options.autoFov !== false;      // measure the camera field of view from the markers
+
       this.isLocked = false;
       this.reset();
     }
 
-    /** Forget everything, including what was learned about the markers. */
+    /** Forget everything, including what was learned about the markers and the camera. */
     reset() {
       this.map = { yaw: {}, yawCount: {}, size: null, sizeCount: 0 };
+      // Measured from the marker centers: camera focal length and the shape of the marker rectangle
+      this.cal = { focal: [], focalFit: [], focalRatio: null, aspect: [], aspectFor: null, measuredAspect: null };
       this.isLocked = false;
       this._gyro = { prev: null, scores: new Array(CAMERA_MOUNTS.length).fill(0), mount: -1, ref: null };
       this._dropTracking();
@@ -543,6 +552,18 @@
       if (v >= 20 && v <= 150) this.fovDegrees = v;
     }
 
+    /** Whether the camera field of view is measured from the markers (true) or always taken from setFov. */
+    setAutoFov(enabled) {
+      this.autoFov = !!enabled;
+    }
+
+    /** The field of view in use right now (degrees, across the longer side of the video). */
+    get effectiveFovDegrees() {
+      return this.autoFov && this.cal.focalRatio
+        ? 2 * Math.atan(0.5 / this.cal.focalRatio) / DEG
+        : this.fovDegrees;
+    }
+
     setLocked(locked) {
       this.isLocked = !!locked && !!this.pose;
       return this.isLocked;
@@ -558,7 +579,7 @@
 
     /** Pinhole intrinsics: square pixels, principal point at the image center. */
     intrinsics(width, height) {
-      const f = (Math.max(width, height) / 2) / Math.tan(this.fovDegrees * DEG / 2);
+      const f = (Math.max(width, height) / 2) / Math.tan(this.effectiveFovDegrees * DEG / 2);
       return { f, cx: width / 2, cy: height / 2 };
     }
 
@@ -580,6 +601,8 @@
       const time = frame.time;
       const K = this.intrinsics(frame.width, frame.height);
       const obs = this._buildObservations(frame, K);
+      this._frameMaxDim = Math.max(frame.width, frame.height);
+      if (this.autoFov) this._calibrate(obs, frame);
 
       // 1. Predict: carry the pose along with the rotation reported by the orientation sensor
       const G = this._gyroDelta(frame.deviceRotation || null);
@@ -640,8 +663,132 @@
         rmsPx: status === 'tracking' ? info.rmsPx : null,
         keys: status === 'tracking' ? info.keys : [],
         gyro: this.gyroActive,
-        intrinsics: K
+        intrinsics: K,
+        fovDegrees: this.effectiveFovDegrees,
+        // Width : length of the rectangle the markers really form (null until measured)
+        measuredAspect: this.cal.measuredAspect
       };
+    }
+
+    /**
+     * Picks the focal length to use from the measurements collected so far. Preferred: the ones that do
+     * not depend on the field's proportions (cal.focal). Otherwise: the ones from fitting the focal
+     * length together with the pose (cal.focalFit), which assume the proportions in the app are right.
+     */
+    _updateFocal() {
+      const cal = this.cal;
+      const src = cal.focal.length >= 20 ? cal.focal : (cal.focalFit.length >= 15 ? cal.focalFit : null);
+      if (!src) return;
+      const a = src.slice().sort((x, y) => x - y);
+      const m = a[a.length >> 1];
+      // Small changes are not worth a visible jump of the overlay
+      if (!cal.focalRatio || Math.abs(m / cal.focalRatio - 1) > 0.015) cal.focalRatio = m;
+    }
+
+    /**
+     * Second way to measure the focal length: let it vary in the fit of one frame. Works when the camera
+     * looks straight along the field too, but takes the field's proportions in the app for granted.
+     */
+    _sampleFocalFit(chosen, obs, f, model) {
+      const cal = this.cal;
+      if (!this.autoFov || obs.length < 4 || cal.focal.length >= 20) return;
+      if ((this._fitTick = (this._fitTick || 0) + 1) % 3 !== 0 && cal.focalFit.length >= 15) return;
+
+      // Perspective must be visible: markers at clearly different distances
+      let zMin = Infinity, zMax = 0;
+      for (const o of obs) {
+        const z = chosen.R[6] * o.c[0] + chosen.R[7] * o.c[1] + chosen.R[8] * o.c[2] + chosen.t[2];
+        zMin = Math.min(zMin, z); zMax = Math.max(zMax, z);
+      }
+      if (!(zMin > 0) || zMax / zMin < 1.3) return;
+
+      const fit = refine(chosen, obs, f, true, Object.assign({}, model, { freeFocal: true }), 15);
+      if (!fit || !(fit.rms < 2) || !(fit.rms < chosen.rms)) return;
+      const ratio = fit.fs * f / this._frameMaxDim;
+      const fov = 2 * Math.atan(0.5 / ratio) / DEG;
+      if (fov < 35 || fov > 100) return;
+      cal.focalFit.push(ratio);
+      if (cal.focalFit.length > 90) cal.focalFit.shift();
+      this._updateFocal();
+    }
+
+    /**
+     * Measures two things from the marker CENTERS alone (5 or more needed), independent of the pose solver:
+     *  - the camera focal length, so the field-of-view setting does not have to be right;
+     *  - the width : length proportion of the rectangle the markers form, to detect a field whose shape
+     *    in the app does not match the markers on the ground.
+     * All marker centers lie in one plane (the ground, or pedestal height), so they map to the image by a
+     * homography H = K [r1 r2 t] diag(a, b, 1), where a, b are how much the real layout is stretched
+     * relative to the field in the app. r1 and r2 are perpendicular (gives the focal length, whatever a
+     * and b are) and equally long (gives a / b once the focal length is known).
+     */
+    _calibrate(obs, frame) {
+      if (obs.length < 5) return;
+      const W = (frame.field && frame.field.widthMeters) || 40;
+      const L = (frame.field && frame.field.lengthMeters) || 20;
+      const s = Math.max(frame.width, frame.height) / 2;
+      const cx = frame.width / 2, cy = frame.height / 2;
+      const ms = 2 / Math.max(W, L);
+
+      const N = [], g = new Array(8).fill(0);
+      for (let i = 0; i < 8; i++) N.push(new Array(8).fill(0));
+      const rowsOf = (o) => {
+        const X = o.c[0] * ms, Y = o.c[1] * ms, u = (o.px[0] - cx) / s, v = (o.px[1] - cy) / s;
+        return [[[X, Y, 1, 0, 0, 0, -u * X, -u * Y], u], [[0, 0, 0, X, Y, 1, -v * X, -v * Y], v]];
+      };
+      for (const o of obs) {
+        for (const [row, rhs] of rowsOf(o)) {
+          for (let a = 0; a < 8; a++) {
+            g[a] += row[a] * rhs;
+            for (let b = 0; b < 8; b++) N[a][b] += row[a] * row[b];
+          }
+        }
+      }
+      const h = solveLinear(N, g);
+      if (!h) return;
+
+      // The centers must really behave like points of one plane
+      let sum = 0;
+      for (const o of obs) {
+        const X = o.c[0] * ms, Y = o.c[1] * ms, w = h[6] * X + h[7] * Y + 1;
+        if (!(w > 1e-9)) return;
+        const du = (h[0] * X + h[1] * Y + h[2]) / w - (o.px[0] - cx) / s;
+        const dv = (h[3] * X + h[4] * Y + h[5]) / w - (o.px[1] - cy) / s;
+        sum += du * du + dv * dv;
+      }
+      if (Math.sqrt(sum / obs.length) * s > 3) return;
+
+      const cal = this.cal;
+      const median = (arr) => { const a = arr.slice().sort((x, y) => x - y); return a[a.length >> 1]; };
+
+      // Focal length from "r1 and r2 are perpendicular" (in units of the longer image side). It does not
+      // depend on the field's proportions being right, but it only works in views where both field
+      // directions converge clearly in the image; otherwise it is a division of two tiny numbers.
+      const n1 = Math.hypot(h[0], h[3]), n2 = Math.hypot(h[1], h[4]);
+      if (Math.abs(h[6]) > 0.06 * n1 && Math.abs(h[7]) > 0.06 * n2) {
+        const f2 = -(h[0] * h[1] + h[3] * h[4]) / (h[6] * h[7]);
+        const fov = f2 > 0 ? 2 * Math.atan(1 / Math.sqrt(f2)) / DEG : 0;
+        if (fov >= 35 && fov <= 100) {
+          cal.focal.push(Math.sqrt(f2) / 2);
+          if (cal.focal.length > 150) cal.focal.shift();
+          this._updateFocal();
+        }
+      }
+
+      // Shape of the marker rectangle. Needs a focal length: the one measured above if there is one
+      // (it is independent of the shape), else the one in use.
+      const fn = cal.focal.length >= 20
+        ? 2 * median(cal.focal)
+        : 1 / Math.tan(this.effectiveFovDegrees * DEG / 2);
+      const q1 = h[0] * h[0] + h[3] * h[3] + fn * fn * h[6] * h[6];
+      const q2 = h[1] * h[1] + h[4] * h[4] + fn * fn * h[7] * h[7];
+      if (q1 > 0 && q2 > 0) {
+        const key = `${W}x${L}`;
+        if (cal.aspectFor !== key) { cal.aspectFor = key; cal.aspect = []; cal.measuredAspect = null; }
+        cal.aspect.push(Math.sqrt(q1 / q2) * W / L);
+        if (cal.aspect.length > 60) cal.aspect.shift();
+        if (cal.aspect.length >= 10) cal.measuredAspect = median(cal.aspect);
+      }
     }
 
     _buildObservations(frame, K) {
@@ -660,8 +807,14 @@
         if (prev && prev.side >= side) continue; // same ID twice: keep the bigger one
         const g = layout[m.key];
         const learned = this.map.yaw[m.key];
+        // True image of the marker center: where its diagonals cross (the mean of the corners is not)
+        const c = m.corners;
+        const d1x = c[2].x - c[0].x, d1y = c[2].y - c[0].y, d2x = c[3].x - c[1].x, d2y = c[3].y - c[1].y;
+        const den = d1x * d2y - d1y * d2x;
+        const tt = Math.abs(den) > 1e-9 ? ((c[1].x - c[0].x) * d2y - (c[1].y - c[0].y) * d2x) / den : 0.5;
         byKey.set(m.key, {
           key: m.key,
+          px: [c[0].x + tt * d1x, c[0].y + tt * d1y],
           c: [g[0], g[1], upright ? this.markerHeightMeters : 0],
           side,
           img: m.corners.map(p => [(p.x - K.cx) / K.f, (p.y - K.cy) / K.f]),
@@ -745,6 +898,7 @@
       for (const c of plausible) {
         if (ref ? rotAngle(c.R, ref.R) < rotAngle(chosen.R, ref.R) : c.cost < chosen.cost) chosen = c;
       }
+      if (this._frameMaxDim) this._sampleFocalFit(chosen, obs, f, model);
       return chosen;
     }
 

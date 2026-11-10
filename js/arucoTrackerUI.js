@@ -560,6 +560,15 @@ class ArUcoTrackerUI {
     const fovInput = document.getElementById('input-aruco-fov');
     if (fovInput && window.arucoFieldTracker) {
       fovInput.value = window.arucoFieldTracker.fovDegrees;
+      const autoInput = document.getElementById('input-aruco-fov-auto');
+      const measuredEl = document.getElementById('aruco-fov-measured');
+      if (autoInput) autoInput.checked = window.arucoFieldTracker.autoFov;
+      if (measuredEl) {
+        const measured = window.arucoFieldTracker.cal && window.arucoFieldTracker.cal.focalRatio;
+        measuredEl.textContent = measured
+          ? `- measured: ${window.arucoFieldTracker.effectiveFovDegrees.toFixed(1)}°`
+          : '- not measured yet';
+      }
     }
     // Marker placement (flat / upright) and, for upright markers, the height of their center
     const placementInput = document.getElementById('input-aruco-placement');
@@ -637,6 +646,8 @@ class ArUcoTrackerUI {
         const fovInput = document.getElementById('input-aruco-fov');
         if (fovInput && window.arucoFieldTracker) {
           window.arucoFieldTracker.setFov(fovInput.value);
+          const autoInput = document.getElementById('input-aruco-fov-auto');
+          if (autoInput) window.arucoFieldTracker.setAutoFov(autoInput.checked);
         }
 
         // Save marker IDs

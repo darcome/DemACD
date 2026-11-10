@@ -413,8 +413,12 @@
                 <i class="fa-solid fa-camera" style="color: var(--accent-blue);"></i> Camera Field of View
               </label>
               <span style="font-size: 11px; color: var(--text-dim); display: block; margin-top: 2px;">
-                Angle across the longer side of the video (phones ~65&deg;, webcams ~60-70&deg;). Tune it if the 3D course drifts away from the markers.
+                Angle across the longer side of the video (phones ~65&deg;, webcams ~60-70&deg;). With Auto it is only the starting value: the real one is measured once 4 or more markers are in view.
               </span>
+              <label style="font-size: 12px; color: var(--text-main); display: flex; align-items: center; gap: 6px; margin-top: 6px;">
+                <input type="checkbox" id="input-aruco-fov-auto" checked> Auto (measure from the markers)
+                <span id="aruco-fov-measured" style="color: var(--text-dim);"></span>
+              </label>
             </div>
             <div style="display: flex; align-items: center; gap: 6px;">
               <input type="number" step="1" min="20" max="150" class="app-input" id="input-aruco-fov" value="65" style="width: 75px; text-align: center;">
