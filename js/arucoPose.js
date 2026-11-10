@@ -1,954 +1,859 @@
 /**
- * Agility Course Designer - ArUco 3D Pose Estimator
- * Real-time 6-DoF field pose estimation from ArUco ground markers.
+ * Agility Course Designer - ArUco field tracker
  *
- * Pipeline per frame:
- *  1. IPPE (Infinitesimal Plane-based Pose Estimation) on the largest visible markers. A single planar
- *     square always has TWO plausible poses (the classic "tilt flip"), so both are kept as candidates.
- *  2. Every candidate (plus the previous frame's pose) is refined with Levenberg-Marquardt over ALL visible
- *     marker corners.
- *  3. The candidate is chosen by reprojection error, then by temporal continuity / plausibility when the
- *     error alone is ambiguous (typical for a single small marker).
- *  4. Adaptive 1-Euro style smoothing anchored on the visible markers, so the course stays glued to the
- *     markers on screen while rotation noise is damped.
+ * Turns the ArUco markers detected in a camera frame into the pose of the camera relative to the agility
+ * field, so the 3D course can be drawn on top of the video.
  *
- * Coordinate conventions:
- *  - Field (Babylon) frame: X east, Y up, Z north, origin at field center. This frame is LEFT-handed.
- *  - Model frame used by the solver: M = (x, -y, z). Flipping Y makes it right-handed, so the solver
- *    works with proper rotations R (det = +1) mapping model -> OpenCV camera (X right, Y down, Z forward).
- *  - Output pose for Babylon: P_babylonCam = R_bab * P_field + T_bab, with R_bab = S R S, T_bab = S T,
- *    S = diag(1, -1, 1).
+ * What is trusted and what is not:
+ *  - TRUSTED: where the CENTER of each marker sits on the field (the 8 perimeter points) and that the
+ *    markers lie flat on the ground.
+ *  - NOT TRUSTED: how each marker is turned on the ground, and the printed marker size. As soon as two or
+ *    more markers are visible both are estimated from the image (and remembered), so a marker dropped on
+ *    the grass a few degrees off - or a scaled-down test layout on a desk - still gives a consistent fit.
+ *    Only when a single marker is visible do the remembered (or default) orientation and size get used.
+ *
+ * Per frame:
+ *  1. IPPE on individual markers gives starting poses (a planar square always has two, the "tilt flip").
+ *  2. Each start is refined by Levenberg-Marquardt on the pixel reprojection error of every visible corner.
+ *  3. The best fit wins; near-ties are resolved by "the camera is not upside down" and by continuity.
+ *  4. The result is smoothed around the visible markers, so they stay locked on screen.
+ *  5. When no marker is visible the pose is held; if the device has an orientation sensor that was verified
+ *     against the markers, the hold keeps following the camera rotation.
+ *
+ * Frames:
+ *  - Field (Babylon world, left-handed): x east, y up, z north, origin at the field center.
+ *  - Ground (solver, right-handed): X = east, Y = north, Z = up.
+ *  - Camera (OpenCV): x right, y down, z forward.  P_cam = R * P_ground + t
+ *
+ * Matrices are flat row-major arrays of 9 numbers.
  */
+(function (global) {
+  'use strict';
 
-// --- SMALL 3x3 / VECTOR HELPERS (row-major flat arrays of length 9) ---
-function _m3MulVec(R, v) {
-  return [
-    R[0] * v[0] + R[1] * v[1] + R[2] * v[2],
-    R[3] * v[0] + R[4] * v[1] + R[5] * v[2],
-    R[6] * v[0] + R[7] * v[1] + R[8] * v[2]
-  ];
-}
+  const DEG = Math.PI / 180;
 
-function _m3Mul(A, B) {
-  const C = new Array(9);
-  for (let i = 0; i < 3; i++) {
-    for (let j = 0; j < 3; j++) {
-      C[i * 3 + j] = A[i * 3] * B[j] + A[i * 3 + 1] * B[3 + j] + A[i * 3 + 2] * B[6 + j];
-    }
-  }
-  return C;
-}
-
-function _m3TMulVec(R, v) {
-  return [
-    R[0] * v[0] + R[3] * v[1] + R[6] * v[2],
-    R[1] * v[0] + R[4] * v[1] + R[7] * v[2],
-    R[2] * v[0] + R[5] * v[1] + R[8] * v[2]
-  ];
-}
-
-function _cross(a, b) {
-  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-}
-
-function _dot(a, b) {
-  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
-// Rodrigues: rotation matrix for rotation vector w
-function _expSO3(w) {
-  const th = Math.hypot(w[0], w[1], w[2]);
-  if (th < 1e-12) return [1, -w[2], w[1], w[2], 1, -w[0], -w[1], w[0], 1];
-  const k = [w[0] / th, w[1] / th, w[2] / th];
-  const c = Math.cos(th), s = Math.sin(th), v = 1 - c;
-  return [
-    c + k[0] * k[0] * v,        k[0] * k[1] * v - k[2] * s, k[0] * k[2] * v + k[1] * s,
-    k[1] * k[0] * v + k[2] * s, c + k[1] * k[1] * v,        k[1] * k[2] * v - k[0] * s,
-    k[2] * k[0] * v - k[1] * s, k[2] * k[1] * v + k[0] * s, c + k[2] * k[2] * v
-  ];
-}
-
-// Angle (radians) between two rotation matrices
-function _rotAngle(A, B) {
-  // trace(A^T B)
-  let tr = 0;
-  for (let i = 0; i < 9; i++) tr += A[i] * B[i];
-  return Math.acos(Math.max(-1, Math.min(1, (tr - 1) / 2)));
-}
-
-// Re-orthonormalize a near-rotation matrix (Gram-Schmidt on rows, keeps it a proper rotation)
-function _orthonormalize(R) {
-  const r0 = [R[0], R[1], R[2]];
-  let n = Math.hypot(r0[0], r0[1], r0[2]);
-  r0[0] /= n; r0[1] /= n; r0[2] /= n;
-  const r1 = [R[3], R[4], R[5]];
-  const d = _dot(r0, r1);
-  r1[0] -= d * r0[0]; r1[1] -= d * r0[1]; r1[2] -= d * r0[2];
-  n = Math.hypot(r1[0], r1[1], r1[2]);
-  r1[0] /= n; r1[1] /= n; r1[2] /= n;
-  const r2 = _cross(r0, r1);
-  return [r0[0], r0[1], r0[2], r1[0], r1[1], r1[2], r2[0], r2[1], r2[2]];
-}
-
-class ArUcoPoseEstimator {
-  constructor(options = {}) {
-    this.markerSizeMeters = options.markerSizeMeters || 0.25; // Default 25cm
-    this.fovDegrees = options.fovDegrees || 65.0;             // FOV across the LONGER image side (typical phone/webcam)
-    this.gracePeriodMs = options.gracePeriodMs || 1500;       // Hold pose for 1.5s on occlusion
-    this.maxReprojErrorPx = options.maxReprojErrorPx || 6.0;  // Reject solutions that don't fit the corners
-
-    // Smoothing (1-Euro style: cutoff frequency grows with motion speed)
-    this.posMinCutoff = 1.5;  // Hz at rest
-    this.posBeta = 0.02;      // extra Hz per px/s of on-screen anchor motion
-    this.rotMinCutoff = 1.0;  // Hz at rest
-    this.rotBeta = 0.05;      // extra Hz per deg/s of rotation
-
-    // Current tracking state
-    this._state = null;            // Smoothed solver pose { R, t } (model -> OpenCV camera)
-    this._rawState = null;         // Last unsmoothed accepted pose { R, t }
-    this._lastFrameTime = 0;
-    this.smoothedPose = null;      // Babylon pose { position, rotationQuaternion }
-    this.lastSeenTime = 0;
-    this.activeMarkerCount = 0;
-    this.primaryMarkerKey = null;
-    this.outlierCount = 0;
-    this.trackedFrames = 0;
-
-    // Lock Anchor Mode (allows walking around field with fixed 3D anchor)
-    this.isAnchorLocked = false;
-    this.lockedPose = null;
-
-    // Device Gyroscope / Orientation Sensor Fusion
-    this.hasGyro = false;
-    this.gyroBaseOrientation = null;
-    this.currentDeviceOrientation = null;
-    this._initDeviceSensors();
-  }
-
-  setMarkerSize(meters) {
-    if (meters > 0) {
-      this.markerSizeMeters = parseFloat(meters);
-    }
-  }
-
-  setFov(degrees) {
-    const v = parseFloat(degrees);
-    if (v >= 20 && v <= 150) {
-      this.fovDegrees = v;
-    }
-  }
-
-  setAnchorLocked(locked) {
-    this.isAnchorLocked = !!locked;
-    if (this.isAnchorLocked && this.smoothedPose) {
-      this.lockedPose = {
-        position: { ...this.smoothedPose.position },
-        rotationQuaternion: { ...this.smoothedPose.rotationQuaternion }
-      };
-      if (this.currentDeviceOrientation) {
-        this.gyroBaseOrientation = { ...this.currentDeviceOrientation };
-      }
-    } else if (!this.isAnchorLocked) {
-      this.lockedPose = null;
-    }
-  }
-
-  toggleAnchorLock() {
-    this.setAnchorLocked(!this.isAnchorLocked);
-    return this.isAnchorLocked;
-  }
-
-  reset() {
-    this._state = null;
-    this._rawState = null;
-    this.smoothedPose = null;
-    this.lastSeenTime = 0;
-    this.activeMarkerCount = 0;
-    this.primaryMarkerKey = null;
-    this.outlierCount = 0;
-    this.trackedFrames = 0;
-    this.isAnchorLocked = false;
-    this.lockedPose = null;
-  }
-
-  // --- DEVICE GYROSCOPE & SENSOR FUSION ---
-  _initDeviceSensors() {
-    if (typeof window === 'undefined') return;
-
-    const handleOrientation = (e) => {
-      if (e.alpha === null || e.beta === null || e.gamma === null) return;
-      this.hasGyro = true;
-      this.currentDeviceOrientation = {
-        alpha: e.alpha, // compass rotation [0, 360)
-        beta: e.beta,   // front-to-back tilt [-180, 180)
-        gamma: e.gamma  // left-to-right tilt [-90, 90)
-      };
-    };
-
-    if (window.DeviceOrientationEvent) {
-      window.addEventListener('deviceorientation', handleOrientation, true);
-    }
-  }
-
-  async requestGyroPermission() {
-    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-      try {
-        const response = await DeviceOrientationEvent.requestPermission();
-        return response === 'granted';
-      } catch (err) {
-        console.warn('DeviceOrientation permission error:', err);
-        return false;
+  // ---------------------------------------------------------------------------------------------
+  // Small linear algebra helpers
+  // ---------------------------------------------------------------------------------------------
+  function mul(A, B) {
+    const C = new Array(9);
+    for (let i = 0; i < 3; i++) {
+      for (let j = 0; j < 3; j++) {
+        C[i * 3 + j] = A[i * 3] * B[j] + A[i * 3 + 1] * B[3 + j] + A[i * 3 + 2] * B[6 + j];
       }
     }
-    return true;
+    return C;
   }
 
-  // --- CAMERA INTRINSICS ---
-  getCameraIntrinsics(width, height) {
-    // FOV refers to the longer side so the same value works in portrait and landscape
-    const fovRad = (this.fovDegrees * Math.PI) / 180;
-    const fx = (Math.max(width, height) / 2) / Math.tan(fovRad / 2);
-    const fy = fx; // Square pixels
-    const cx = width / 2;
-    const cy = height / 2;
-    return { fx, fy, cx, cy };
+  function mulVec(A, v) {
+    return [
+      A[0] * v[0] + A[1] * v[1] + A[2] * v[2],
+      A[3] * v[0] + A[4] * v[1] + A[5] * v[2],
+      A[6] * v[0] + A[7] * v[1] + A[8] * v[2]
+    ];
   }
 
-  /** Vertical FOV (radians) matching getCameraIntrinsics, for the Babylon camera. */
-  getVerticalFov(width, height) {
-    const K = this.getCameraIntrinsics(width, height);
-    return 2 * Math.atan((height / 2) / K.fy);
+  function tMulVec(A, v) {
+    return [
+      A[0] * v[0] + A[3] * v[1] + A[6] * v[2],
+      A[1] * v[0] + A[4] * v[1] + A[7] * v[2],
+      A[2] * v[0] + A[5] * v[1] + A[8] * v[2]
+    ];
   }
 
-  // --- 8 PREDEFINED MARKER FIELD POSITIONS ---
-  /**
-   * Returns 3D coordinates in meters [X, 0, Z] in field space for each of the 8 perimeter markers.
-   * Field coordinate system: Center is (0,0,0), X is width (-W/2 to +W/2), Z is length (+L/2 to -L/2).
-   */
-  getMarkerFieldCoordinates(field) {
-    const W = field ? (field.widthMeters || 40) : 40;
-    const L = field ? (field.lengthMeters || 20) : 20;
-    const halfW = W / 2;
-    const halfL = L / 2;
+  function transpose(A) {
+    return [A[0], A[3], A[6], A[1], A[4], A[7], A[2], A[5], A[8]];
+  }
 
+  function cross(a, b) {
+    return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  }
+
+  function dot(a, b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  }
+
+  /** Rotation matrix for the rotation vector w (Rodrigues). */
+  function expSO3(w) {
+    const th = Math.hypot(w[0], w[1], w[2]);
+    if (th < 1e-12) return [1, -w[2], w[1], w[2], 1, -w[0], -w[1], w[0], 1];
+    const kx = w[0] / th, ky = w[1] / th, kz = w[2] / th;
+    const c = Math.cos(th), s = Math.sin(th), v = 1 - c;
+    return [
+      c + kx * kx * v, kx * ky * v - kz * s, kx * kz * v + ky * s,
+      ky * kx * v + kz * s, c + ky * ky * v, ky * kz * v - kx * s,
+      kz * kx * v - ky * s, kz * ky * v + kx * s, c + kz * kz * v
+    ];
+  }
+
+  /** Angle in radians of the rotation that takes A to B. */
+  function rotAngle(A, B) {
+    let tr = 0;
+    for (let i = 0; i < 9; i++) tr += A[i] * B[i];
+    return Math.acos(Math.max(-1, Math.min(1, (tr - 1) / 2)));
+  }
+
+  /** Gram-Schmidt on the rows; keeps a nearly-orthogonal matrix a proper rotation. */
+  function orthonormalize(R) {
+    let r0 = [R[0], R[1], R[2]];
+    let n = Math.hypot(r0[0], r0[1], r0[2]);
+    r0 = [r0[0] / n, r0[1] / n, r0[2] / n];
+    let r1 = [R[3], R[4], R[5]];
+    const d = dot(r0, r1);
+    r1 = [r1[0] - d * r0[0], r1[1] - d * r0[1], r1[2] - d * r0[2]];
+    n = Math.hypot(r1[0], r1[1], r1[2]);
+    r1 = [r1[0] / n, r1[1] / n, r1[2] / n];
+    const r2 = cross(r0, r1);
+    return [r0[0], r0[1], r0[2], r1[0], r1[1], r1[2], r2[0], r2[1], r2[2]];
+  }
+
+  /** Rotation that goes the fraction alpha of the way from A to B. */
+  function slerp(A, B, alpha) {
+    if (alpha >= 1) return B.slice();
+    const D = mul(B, transpose(A));
+    const ang = Math.acos(Math.max(-1, Math.min(1, (D[0] + D[4] + D[8] - 1) / 2)));
+    if (ang < 1e-9) return B.slice();
+    const s = 2 * Math.sin(ang);
+    if (Math.abs(s) < 1e-6) return B.slice(); // 180 degrees apart: no unique path, just snap
+    const k = alpha * ang / s;
+    return orthonormalize(mul(expSO3([(D[7] - D[5]) * k, (D[2] - D[6]) * k, (D[3] - D[1]) * k]), A));
+  }
+
+  /** Gaussian elimination with partial pivoting. Returns null for a singular system. */
+  function solveLinear(A, b) {
+    const n = b.length;
+    const M = A.map((row, i) => row.concat([b[i]]));
+    for (let i = 0; i < n; i++) {
+      let p = i;
+      for (let r = i + 1; r < n; r++) if (Math.abs(M[r][i]) > Math.abs(M[p][i])) p = r;
+      if (!(Math.abs(M[p][i]) > 1e-14)) return null;
+      if (p !== i) { const tmp = M[i]; M[i] = M[p]; M[p] = tmp; }
+      const piv = M[i][i];
+      for (let c = i; c <= n; c++) M[i][c] /= piv;
+      for (let r = 0; r < n; r++) {
+        if (r === i) continue;
+        const fct = M[r][i];
+        if (fct === 0) continue;
+        for (let c = i; c <= n; c++) M[r][c] -= fct * M[i][c];
+      }
+    }
+    const x = M.map(row => row[n]);
+    return x.every(Number.isFinite) ? x : null;
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Field layout
+  // ---------------------------------------------------------------------------------------------
+  // ArUco corner order is clockwise from the marker's own top-left. For a marker lying on the ground with
+  // its top toward north that is (west,north), (east,north), (east,south), (west,south).
+  const CORNER_SIGNS = [[-1, 1], [1, 1], [1, -1], [-1, -1]];
+
+  /** Ground position [X east, Y north] of the center of each of the 8 perimeter markers. */
+  function markerLayout(field) {
+    const W = (field && field.widthMeters) || 40;
+    const L = (field && field.lengthMeters) || 20;
+    const hw = W / 2, hl = L / 2;
     return {
-      top_left:     { x: -halfW, y: 0, z: halfL },
-      top_mid:      { x: 0,      y: 0, z: halfL },
-      top_right:    { x: halfW,  y: 0, z: halfL },
-      right_mid:    { x: halfW,  y: 0, z: 0 },
-      bottom_right: { x: halfW,  y: 0, z: -halfL },
-      bottom_mid:   { x: 0,      y: 0, z: -halfL },
-      bottom_left:  { x: -halfW, y: 0, z: -halfL },
-      left_mid:     { x: -halfW, y: 0, z: 0 }
+      top_left: [-hw, hl], top_mid: [0, hl], top_right: [hw, hl],
+      right_mid: [hw, 0],
+      bottom_right: [hw, -hl], bottom_mid: [0, -hl], bottom_left: [-hw, -hl],
+      left_mid: [-hw, 0]
     };
   }
 
+  // ---------------------------------------------------------------------------------------------
+  // IPPE: the two poses of a single square marker (Collins & Bartoli, IJCV 2014)
+  // ---------------------------------------------------------------------------------------------
   /**
-   * Main pose estimation entry point called per video frame.
-   * @param {Array} detectedMarkers - Array of { id, corners: [{x,y}...4], center: {x,y} }
-   * @param {Object} idToKeyMap - Map of marker ID to field definition key (e.g. { 0: 'top_left' })
-   * @param {Object} field - Agility Field model
-   * @param {number} imgWidth - Camera canvas pixel width
-   * @param {number} imgHeight - Camera canvas pixel height
+   * @param {number} half - half of the marker edge length
+   * @param {number[][]} img - the 4 corners in normalized image coordinates [(px - cx) / f, (py - cy) / f]
+   * @returns {{R:number[], t:number[]}[]} up to two marker -> camera poses. Marker frame: x toward the
+   *          marker's right edge, y toward its top edge, z out of the printed face.
    */
-  estimatePose(detectedMarkers, idToKeyMap, field, imgWidth, imgHeight) {
-    const now = Date.now();
-
-    // 1. If Lock Anchor is active, retain frozen anchor position
-    if (this.isAnchorLocked && this.lockedPose) {
-      return {
-        pose: this.lockedPose,
-        status: 'locked',
-        markerCount: detectedMarkers ? detectedMarkers.length : 0,
-        isLocked: true
-      };
+  function ippeSquare(half, img) {
+    // Homography from the marker plane (in units of `half`, so corners are at +-1) to the image
+    const A = [], b = [];
+    for (let i = 0; i < 4; i++) {
+      const X = CORNER_SIGNS[i][0], Y = CORNER_SIGNS[i][1];
+      const u = img[i][0], v = img[i][1];
+      A.push([X, Y, 1, 0, 0, 0, -u * X, -u * Y]); b.push(u);
+      A.push([0, 0, 0, X, Y, 1, -v * X, -v * Y]); b.push(v);
     }
+    const h = solveLinear(A, b);
+    if (!h) return [];
+    // Back to metric plane units
+    const H00 = h[0] / half, H01 = h[1] / half, p = h[2];
+    const H10 = h[3] / half, H11 = h[4] / half, q = h[5];
+    const H20 = h[6] / half, H21 = h[7] / half;
 
-    const fieldCoords = this.getMarkerFieldCoordinates(field);
-    const K = this.getCameraIntrinsics(imgWidth, imgHeight);
+    const J00 = H00 - H20 * p, J01 = H01 - H21 * p;
+    const J10 = H10 - H20 * q, J11 = H11 - H21 * q;
 
-    // Identify detected markers that match known field positions
-    const validMarkers = [];
-    const seenIds = new Set();
-    if (detectedMarkers && detectedMarkers.length > 0) {
-      for (const m of detectedMarkers) {
-        const key = idToKeyMap[m.id];
-        // Ignore duplicates of the same ID (a false detection would corrupt the solve)
-        if (!key || !fieldCoords[key] || !m.corners || m.corners.length !== 4 || seenIds.has(m.id)) continue;
-        // Calculate apparent pixel perimeter to weight larger/closer markers higher
-        let perimeter = 0;
-        for (let i = 0; i < 4; i++) {
-          const p1 = m.corners[i];
-          const p2 = m.corners[(i + 1) % 4];
-          perimeter += Math.hypot(p2.x - p1.x, p2.y - p1.y);
-        }
-        // Reject degenerate/tiny false detections (< 24px total perimeter)
-        if (perimeter >= 24) {
-          seenIds.add(m.id);
-          validMarkers.push({
-            id: m.id,
-            key: key,
-            fieldPos: fieldCoords[key],
-            corners: m.corners,
-            center: m.center,
-            perimeter: perimeter
-          });
-        }
-      }
-    }
-
-    // Sort by apparent size descending so closest/clearest marker is primary
-    validMarkers.sort((a, b) => b.perimeter - a.perimeter);
-    this.activeMarkerCount = validMarkers.length;
-
-    // --- CASE 1: AT LEAST ONE MARKER DETECTED ---
-    if (validMarkers.length > 0) {
-      this.primaryMarkerKey = validMarkers.length === 1
-        ? validMarkers[0].key
-        : validMarkers.map(m => m.key).join('+');
-
-      const solved = this._solve(validMarkers, K, now);
-
-      if (solved) {
-        const prevRecent = this._rawState && (now - this.lastSeenTime < 500);
-
-        // Outlier rejection: a sudden big jump must be confirmed by a few consecutive frames
-        if (prevRecent && this._state) {
-          const angleJumpDeg = _rotAngle(solved.R, this._state.R) * 180 / Math.PI;
-          const anchorPrev = _m3MulVec(this._state.R, solved.anchor);
-          const anchorNew = _m3MulVec(solved.R, solved.anchor);
-          const posJump = Math.hypot(
-            anchorNew[0] + solved.t[0] - anchorPrev[0] - this._state.t[0],
-            anchorNew[1] + solved.t[1] - anchorPrev[1] - this._state.t[1],
-            anchorNew[2] + solved.t[2] - anchorPrev[2] - this._state.t[2]
-          );
-          if ((posJump > 3.0 || angleJumpDeg > 25.0) && this.outlierCount < 3) {
-            this.outlierCount++;
-            return {
-              pose: this.smoothedPose,
-              status: 'holding',
-              markerCount: validMarkers.length,
-              primaryKey: this.primaryMarkerKey,
-              isLocked: false
-            };
-          }
-        }
-
-        this.outlierCount = 0;
-        this.trackedFrames = prevRecent ? this.trackedFrames + 1 : 1;
-
-        this._rawState = { R: solved.R, t: solved.t };
-        this._smoothState(solved, K, now);
-        this.lastSeenTime = now;
-        this.smoothedPose = this._convertCvToBabylon(this._state.R, this._state.t);
-
-        return {
-          pose: this.smoothedPose,
-          status: validMarkers.length === 1 ? 'single' : 'multi',
-          markerCount: validMarkers.length,
-          primaryKey: this.primaryMarkerKey,
-          reprojErrorPx: solved.errPx,
-          isLocked: false
-        };
-      }
-    }
-
-    // --- CASE 2: NO (USABLE) MARKERS IN CURRENT FRAME ---
-    // Check if within grace period (prevent flickering on brief occlusion)
-    if (this.smoothedPose && (now - this.lastSeenTime <= this.gracePeriodMs)) {
-      return {
-        pose: this.smoothedPose,
-        status: 'holding',
-        markerCount: 0,
-        elapsedHolding: now - this.lastSeenTime,
-        isLocked: false
-      };
-    }
-
-    // Tracking lost: reset so next acquisition snaps cleanly
-    this._state = null;
-    this._rawState = null;
-    this.smoothedPose = null;
-    this.trackedFrames = 0;
-
-    return {
-      pose: null,
-      status: 'lost',
-      markerCount: 0,
-      isLocked: false
-    };
-  }
-
-  // --- POSE SOLVER: CANDIDATES + REFINEMENT + DISAMBIGUATION ---
-  _solve(markers, K, now) {
-    const s2 = this.markerSizeMeters / 2;
-    const f = K.fx;
-
-    // Observations in model coordinates + normalized image coordinates
-    const pts = [];
-    let ax = 0, az = 0;
-    for (const m of markers) {
-      const F = m.fieldPos;
-      ax += F.x; az += F.z;
-      const local = [[-s2, s2], [s2, s2], [s2, -s2], [-s2, -s2]]; // c0 TL, c1 TR, c2 BR, c3 BL (x, z)
-      for (let i = 0; i < 4; i++) {
-        pts.push({
-          M: [F.x + local[i][0], 0, F.z + local[i][1]],
-          u: (m.corners[i].x - K.cx) / K.fx,
-          v: (m.corners[i].y - K.cy) / K.fy
-        });
-      }
-    }
-    // Anchor (model coords) = centroid of the visible markers; used for smoothing and jump checks
-    const anchor = [ax / markers.length, 0, az / markers.length];
-
-    // 1. Candidate generation
-    const seeds = [];
-    for (const m of markers.slice(0, 2)) {
-      for (const sol of this._ippeSquare(m, K)) seeds.push({ ...sol, fromMarker: m.key });
-    }
-    const prevRecent = this._rawState && (now - this.lastSeenTime < 700);
-    if (prevRecent) seeds.push({ R: this._rawState.R, t: this._rawState.t, fromPrev: true });
-    if (seeds.length === 0) return null;
-
-    // 2. Refinement over all visible corners
-    const candidates = [];
-    for (const seed of seeds) {
-      const ref = this._refinePose(seed.R, seed.t, pts, f);
-      if (!ref) continue;
-      // Camera must be above the ground plane (field height = -model Y of camera center)
-      const C = _m3TMulVec(ref.R, ref.t);
-      ref.camHeight = C[1]; // -(-R^T t).y
-      if (ref.camHeight < 0.05) continue;
-      ref.fromPrev = !!seed.fromPrev;
-      candidates.push(ref);
-    }
-    if (candidates.length === 0) return null;
-
-    candidates.sort((a, b) => a.errPx - b.errPx);
-    const best = candidates[0];
-    if (best.errPx > this.maxReprojErrorPx) return null;
-
-    // 3. Disambiguation among candidates that fit (almost) as well as the best
-    const tol = Math.max(best.errPx * 1.5, best.errPx + 0.75);
-    const plausible = candidates.filter(c => c.errPx <= tol);
-    let chosen = best;
-    if (plausible.length > 1) {
-      if (prevRecent) {
-        chosen = plausible.reduce((a, b) =>
-          (_rotAngle(a.R, this._rawState.R) <= _rotAngle(b.R, this._rawState.R) ? a : b));
-      } else {
-        // No history: prefer the field's "up" pointing up in the image (up_cv.y = -R[4] < 0)
-        // and a hand-held camera height
-        const score = c => c.errPx - 2.0 * c.R[4] + 0.5 * Math.abs(c.camHeight - 1.5);
-        chosen = plausible.reduce((a, b) => (score(a) <= score(b) ? a : b));
-      }
-    }
-
-    return { R: chosen.R, t: chosen.t, errPx: chosen.errPx, anchor };
-  }
-
-  /**
-   * IPPE for one square marker: returns up to two { R, t } candidates in the solver's model frame.
-   * Collins & Bartoli, "Infinitesimal Plane-Based Pose Estimation", IJCV 2014.
-   */
-  _ippeSquare(marker, K) {
-    const s2 = this.markerSizeMeters / 2;
-    // Plane coordinates centered on the marker: (X, Y) = (field x offset, field z offset)
-    const planePts = [{ x: -s2, z: s2 }, { x: s2, z: s2 }, { x: s2, z: -s2 }, { x: -s2, z: -s2 }];
-    const imgPts = marker.corners.map(c => ({ x: (c.x - K.cx) / K.fx, y: (c.y - K.cy) / K.fy }));
-
-    const Hm = this._computeNormalizedHomography(planePts, imgPts);
-    if (!Hm || Math.abs(Hm[2][2]) < 1e-12) return [];
-    const h22 = Hm[2][2];
-    const H = Hm.map(row => row.map(v => v / h22));
-
-    const p = H[0][2], q = H[1][2];
-    const J00 = H[0][0] - H[2][0] * p, J01 = H[0][1] - H[2][1] * p;
-    const J10 = H[1][0] - H[2][0] * q, J11 = H[1][1] - H[2][1] * q;
-
-    // Rv rotates the optical axis onto the ray through the image of the plane origin
-    const n = [p, q, 1];
-    const nl = Math.hypot(p, q, 1);
-    n[0] /= nl; n[1] /= nl; n[2] /= nl;
-    let Rv;
-    const axisLen = Math.hypot(n[0], n[1]);
-    if (axisLen < 1e-12) {
-      Rv = [1, 0, 0, 0, 1, 0, 0, 0, 1];
-    } else {
-      const th = Math.atan2(axisLen, n[2]);
-      Rv = _expSO3([-n[1] / axisLen * th, n[0] / axisLen * th, 0]);
-    }
+    // Rv turns the optical axis onto the ray through the image of the marker center
+    const tn = Math.hypot(p, q);
+    const Rv = tn < 1e-12 ? [1, 0, 0, 0, 1, 0, 0, 0, 1]
+      : expSO3([-q / tn * Math.atan2(tn, 1), p / tn * Math.atan2(tn, 1), 0]);
 
     const B00 = Rv[0] - p * Rv[6], B01 = Rv[1] - p * Rv[7];
     const B10 = Rv[3] - q * Rv[6], B11 = Rv[4] - q * Rv[7];
     const det = B00 * B11 - B01 * B10;
-    if (Math.abs(det) < 1e-12) return [];
-    const Bi00 = B11 / det, Bi01 = -B01 / det, Bi10 = -B10 / det, Bi11 = B00 / det;
+    if (!(Math.abs(det) > 1e-12)) return [];
+    const A00 = (B11 * J00 - B01 * J10) / det, A01 = (B11 * J01 - B01 * J11) / det;
+    const A10 = (-B10 * J00 + B00 * J10) / det, A11 = (-B10 * J01 + B00 * J11) / det;
 
-    const A00 = Bi00 * J00 + Bi01 * J10, A01 = Bi00 * J01 + Bi01 * J11;
-    const A10 = Bi10 * J00 + Bi11 * J10, A11 = Bi10 * J01 + Bi11 * J11;
-
-    // Largest singular value of A
-    const ata00 = A00 * A00 + A10 * A10;
-    const ata01 = A00 * A01 + A10 * A11;
-    const ata11 = A01 * A01 + A11 * A11;
-    const gamma2 = 0.5 * (ata00 + ata11 + Math.sqrt((ata00 - ata11) * (ata00 - ata11) + 4 * ata01 * ata01));
-    if (!(gamma2 > 1e-18)) return [];
-    const gamma = Math.sqrt(gamma2);
+    // Largest singular value of the 2x2 matrix
+    const s00 = A00 * A00 + A10 * A10, s01 = A00 * A01 + A10 * A11, s11 = A01 * A01 + A11 * A11;
+    const gamma = Math.sqrt(0.5 * (s00 + s11 + Math.sqrt((s00 - s11) * (s00 - s11) + 4 * s01 * s01)));
+    if (!(gamma > 1e-12)) return [];
 
     const r00 = A00 / gamma, r01 = A01 / gamma, r10 = A10 / gamma, r11 = A11 / gamma;
     const b0 = Math.sqrt(Math.max(0, 1 - r00 * r00 - r10 * r10));
     let b1 = Math.sqrt(Math.max(0, 1 - r01 * r01 - r11 * r11));
     if (r00 * r01 + r10 * r11 > 0) b1 = -b1;
 
-    const results = [];
+    const out = [];
     for (const sgn of [1, -1]) {
       const c0 = [r00, r10, sgn * b0];
       const c1 = [r01, r11, sgn * b1];
-      const c2 = _cross(c0, c1);
-      const Rt = [c0[0], c1[0], c2[0], c0[1], c1[1], c2[1], c0[2], c1[2], c2[2]];
-      const Rp = _orthonormalize(_m3Mul(Rv, Rt)); // columns: plane X, plane Y, plane normal
+      const c2 = cross(c0, c1);
+      const R = orthonormalize(mul(Rv, [c0[0], c1[0], c2[0], c0[1], c1[1], c2[1], c0[2], c1[2], c2[2]]));
 
       // Translation by linear least squares over the 4 corners
-      const AtA = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
-      const Atb = [0, 0, 0];
+      const N = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], g = [0, 0, 0];
       for (let i = 0; i < 4; i++) {
-        const X = planePts[i].x, Y = planePts[i].z;
-        const Rm = [Rp[0] * X + Rp[1] * Y, Rp[3] * X + Rp[4] * Y, Rp[6] * X + Rp[7] * Y];
-        const u = imgPts[i].x, v = imgPts[i].y;
-        const rows = [[1, 0, -u, u * Rm[2] - Rm[0]], [0, 1, -v, v * Rm[2] - Rm[1]]];
+        const X = CORNER_SIGNS[i][0] * half, Y = CORNER_SIGNS[i][1] * half;
+        const P = [R[0] * X + R[1] * Y, R[3] * X + R[4] * Y, R[6] * X + R[7] * Y];
+        const rows = [[1, 0, -img[i][0], img[i][0] * P[2] - P[0]], [0, 1, -img[i][1], img[i][1] * P[2] - P[1]]];
         for (const r of rows) {
           for (let a = 0; a < 3; a++) {
-            Atb[a] += r[a] * r[3];
-            for (let b = 0; b < 3; b++) AtA[a][b] += r[a] * r[b];
+            g[a] += r[a] * r[3];
+            for (let c = 0; c < 3; c++) N[a][c] += r[a] * r[c];
           }
         }
       }
-      const tp = this._solveLinearSystem(AtA, Atb);
-      if (!tp || tp[2] <= 0) continue;
-
-      // Plane frame -> model frame: model x = plane X, model z = plane Y, model y = z x x = -normal
-      const col0 = [Rp[0], Rp[3], Rp[6]];
-      const col2 = [Rp[1], Rp[4], Rp[7]];
-      const col1 = _cross(col2, col0);
-      const R = [col0[0], col1[0], col2[0], col0[1], col1[1], col2[1], col0[2], col1[2], col2[2]];
-      const Mc = [marker.fieldPos.x, 0, marker.fieldPos.z];
-      const RMc = _m3MulVec(R, Mc);
-      results.push({ R, t: [tp[0] - RMc[0], tp[1] - RMc[1], tp[2] - RMc[2]] });
+      const t = solveLinear(N, g);
+      if (t && t[2] > 0) out.push({ R, t });
     }
-    return results;
+    return out;
   }
 
-  _reprojErrorPx(R, t, pts, f) {
-    let sum = 0;
-    for (const p of pts) {
-      const P = _m3MulVec(R, p.M);
-      const z = P[2] + t[2];
-      if (z <= 1e-3) return Infinity;
-      const du = (P[0] + t[0]) / z - p.u;
-      const dv = (P[1] + t[1]) / z - p.v;
-      sum += du * du + dv * dv;
+  // ---------------------------------------------------------------------------------------------
+  // Reprojection model and Levenberg-Marquardt refinement
+  // ---------------------------------------------------------------------------------------------
+  const HUBER_PX = 3.0;
+
+  /**
+   * Pixel residuals of every corner for the state { R, t, yaws[], size }.
+   * obs[k] = { c: [X, Y] marker center on the ground, img: 4 normalized corners }
+   * Returns null when a corner falls behind the camera.
+   */
+  function residuals(st, obs, f) {
+    const R = st.R, t = st.t, half = st.size / 2;
+    const out = new Float64Array(obs.length * 8);
+    for (let k = 0; k < obs.length; k++) {
+      const o = obs[k];
+      const cs = Math.cos(st.yaws[k]) * half, sn = Math.sin(st.yaws[k]) * half;
+      for (let j = 0; j < 4; j++) {
+        const sx = CORNER_SIGNS[j][0], sy = CORNER_SIGNS[j][1];
+        const X = o.c[0] + cs * sx - sn * sy;
+        const Y = o.c[1] + sn * sx + cs * sy;
+        const z = R[6] * X + R[7] * Y + t[2];
+        if (!(z > 1e-6)) return null;
+        out[k * 8 + j * 2] = f * ((R[0] * X + R[1] * Y + t[0]) / z - o.img[j][0]);
+        out[k * 8 + j * 2 + 1] = f * ((R[3] * X + R[4] * Y + t[1]) / z - o.img[j][1]);
+      }
     }
-    return f * Math.sqrt(sum / pts.length);
+    return out;
   }
 
-  /** Levenberg-Marquardt refinement of (R, t) minimizing pixel reprojection error (Huber-weighted). */
-  _refinePose(R0, t0, pts, f, maxIters = 15) {
-    const HUBER_PX = 2.0;
-    let R = R0.slice();
-    let t = t0.slice();
+  function robustCost(r) {
+    let cost = 0;
+    for (let i = 0; i < r.length; i += 2) {
+      const e2 = r[i] * r[i] + r[i + 1] * r[i + 1];
+      cost += e2 <= HUBER_PX * HUBER_PX ? e2 : 2 * HUBER_PX * Math.sqrt(e2) - HUBER_PX * HUBER_PX;
+    }
+    return cost;
+  }
+
+  /**
+   * Refines a starting state. The camera pose is always optimized; with freeExtras the turn of every
+   * marker on the ground and the common marker size are optimized too.
+   */
+  function refine(start, obs, f, freeExtras, maxIter) {
+    const n = obs.length;
+    const nP = 6 + (freeExtras ? n + 1 : 0);
+
+    const apply = (st, d) => ({
+      R: orthonormalize(mul(expSO3([d[0], d[1], d[2]]), st.R)),
+      t: [st.t[0] + d[3], st.t[1] + d[4], st.t[2] + d[5]],
+      yaws: freeExtras ? st.yaws.map((y, i) => y + d[6 + i]) : st.yaws,
+      size: freeExtras ? st.size * Math.exp(d[6 + n]) : st.size
+    });
+
+    let st = { R: start.R, t: start.t, yaws: start.yaws, size: start.size };
+    let r = residuals(st, obs, f);
+    if (!r) return null;
+    let cost = robustCost(r);
     let lambda = 1e-3;
+    const EPS = 1e-6;
+    const m = r.length;
 
-    const evaluate = (R, t, buildJ) => {
-      const JtJ = buildJ ? Array.from({ length: 6 }, () => new Array(6).fill(0)) : null;
-      const Jtr = buildJ ? new Array(6).fill(0) : null;
-      let cost = 0;
+    for (let iter = 0; iter < (maxIter || 12); iter++) {
+      // Numeric Jacobian (at most 15 parameters, so this stays cheap)
+      const J = [];
+      let ok = true;
+      for (let p = 0; p < nP && ok; p++) {
+        const d = new Array(nP).fill(0);
+        d[p] = EPS;
+        const rp = residuals(apply(st, d), obs, f);
+        if (!rp) { ok = false; break; }
+        const col = new Float64Array(m);
+        for (let i = 0; i < m; i++) col[i] = (rp[i] - r[i]) / EPS;
+        J.push(col);
+      }
+      if (!ok) break;
 
-      const accumulate = (Jrow, r, w) => {
-        cost += w * r * r;
-        if (!buildJ) return;
-        for (let a = 0; a < 6; a++) {
-          Jtr[a] += w * Jrow[a] * r;
-          for (let b = a; b < 6; b++) JtJ[a][b] += w * Jrow[a] * Jrow[b];
-        }
-      };
-
-      for (const p of pts) {
-        const a = _m3MulVec(R, p.M);
-        const X = a[0] + t[0], Y = a[1] + t[1], Z = a[2] + t[2];
-        if (Z <= 1e-3) return null;
-        const iz = 1 / Z;
-        const x = X * iz, y = Y * iz;
-        const ru = f * (x - p.u), rv = f * (y - p.v);
-        // d(pixel)/dP = f * [[1/Z, 0, -x/Z], [0, 1/Z, -y/Z]];  dP/dw = -[a]x;  dP/dt = I
-        const du = [f * iz, 0, -f * x * iz];
-        const dv = [0, f * iz, -f * y * iz];
-        const Ju = [
-          du[1] * -a[2] + du[2] * a[1], du[0] * a[2] + du[2] * -a[0], du[0] * -a[1] + du[1] * a[0],
-          du[0], du[1], du[2]
-        ];
-        const Jv = [
-          dv[1] * -a[2] + dv[2] * a[1], dv[0] * a[2] + dv[2] * -a[0], dv[0] * -a[1] + dv[1] * a[0],
-          dv[0], dv[1], dv[2]
-        ];
-        const e = Math.hypot(ru, rv);
-        const w = e > HUBER_PX ? HUBER_PX / e : 1.0;
-        accumulate(Ju, ru, w);
-        accumulate(Jv, rv, w);
+      // Huber weights per corner
+      const w = new Float64Array(m);
+      for (let i = 0; i < m; i += 2) {
+        const e = Math.hypot(r[i], r[i + 1]);
+        w[i] = w[i + 1] = e > HUBER_PX ? HUBER_PX / e : 1;
       }
 
-      if (buildJ) {
-        for (let a = 0; a < 6; a++) for (let b = 0; b < a; b++) JtJ[a][b] = JtJ[b][a];
+      const Hm = [], g = [];
+      for (let a = 0; a < nP; a++) {
+        Hm.push(new Array(nP).fill(0));
+        let ga = 0;
+        for (let i = 0; i < m; i++) ga += w[i] * J[a][i] * r[i];
+        g.push(-ga);
       }
-      return { cost, JtJ, Jtr };
-    };
-
-    let cur = evaluate(R, t, true);
-    if (!cur) return null;
-
-    for (let iter = 0; iter < maxIters; iter++) {
-      const A = cur.JtJ.map((row, i) => row.map((v, j) => (i === j ? v * (1 + lambda) + 1e-9 : v)));
-      const delta = this._solveLinearSystem(A, cur.Jtr.map(v => -v));
-      if (!delta) break;
-
-      const Rn = _orthonormalize(_m3Mul(_expSO3([delta[0], delta[1], delta[2]]), R));
-      const tn = [t[0] + delta[3], t[1] + delta[4], t[2] + delta[5]];
-      const next = evaluate(Rn, tn, true);
-
-      if (next && next.cost < cur.cost) {
-        const improvement = cur.cost - next.cost;
-        R = Rn; t = tn; cur = next;
-        lambda = Math.max(1e-7, lambda / 3);
-        if (improvement < 1e-6 * (cur.cost + 1e-9)) break;
-      } else {
-        lambda *= 5;
-        if (lambda > 1e6) break;
-      }
-      const stepNorm = Math.hypot(delta[0], delta[1], delta[2], delta[3], delta[4], delta[5]);
-      if (stepNorm < 1e-9) break;
-    }
-
-    return { R, t, errPx: this._reprojErrorPx(R, t, pts, f) };
-  }
-
-  // --- TEMPORAL SMOOTHING (anchored on the visible markers) ---
-  /**
-   * Smooths rotation and the camera-space position of the marker anchor separately, then rebuilds the
-   * translation from them. Keeping the anchor (what the user is looking at) as the pivot means rotation
-   * smoothing never drags the course away from the markers on screen.
-   */
-  _smoothState(solved, K, now) {
-    if (!this._state || now - this._lastFrameTime > 500) {
-      this._state = { R: solved.R.slice(), t: solved.t.slice() };
-      this._lastFrameTime = now;
-      return;
-    }
-    const dt = Math.max(0.005, Math.min(0.25, (now - this._lastFrameTime) / 1000));
-    this._lastFrameTime = now;
-
-    const A = solved.anchor;
-    const aPrevR = _m3MulVec(this._state.R, A);
-    const aNewR = _m3MulVec(solved.R, A);
-    const aPrev = [aPrevR[0] + this._state.t[0], aPrevR[1] + this._state.t[1], aPrevR[2] + this._state.t[2]];
-    const aNew = [aNewR[0] + solved.t[0], aNewR[1] + solved.t[1], aNewR[2] + solved.t[2]];
-
-    // Speed of the anchor on screen (px/s) and rotation speed (deg/s)
-    const z = Math.max(0.1, aNew[2]);
-    const pxDelta = K.fx * Math.hypot(aNew[0] - aPrev[0], aNew[1] - aPrev[1]) / z
-      + K.fx * Math.abs(aNew[2] - aPrev[2]) / z * 0.5;
-    const angDelta = _rotAngle(this._state.R, solved.R) * 180 / Math.PI;
-
-    const alphaFor = (cutoff) => 1 - Math.exp(-2 * Math.PI * cutoff * dt);
-    const aPos = alphaFor(this.posMinCutoff + this.posBeta * pxDelta / dt);
-    const aRot = alphaFor(this.rotMinCutoff + this.rotBeta * angDelta / dt);
-
-    const anchorF = [
-      aPrev[0] + (aNew[0] - aPrev[0]) * aPos,
-      aPrev[1] + (aNew[1] - aPrev[1]) * aPos,
-      aPrev[2] + (aNew[2] - aPrev[2]) * aPos
-    ];
-    const qPrev = this._quaternionFromMatrix(this._toNested(this._state.R));
-    const qNew = this._quaternionFromMatrix(this._toNested(solved.R));
-    const RF = this._matrixFromQuaternion(this._quaternionSlerp(qPrev, qNew, aRot));
-    const RA = _m3MulVec(RF, A);
-
-    this._state = { R: RF, t: [anchorF[0] - RA[0], anchorF[1] - RA[1], anchorF[2] - RA[2]] };
-  }
-
-  _toNested(R) {
-    return [[R[0], R[1], R[2]], [R[3], R[4], R[5]], [R[6], R[7], R[8]]];
-  }
-
-  _matrixFromQuaternion(q) {
-    const { x, y, z, w } = q;
-    return [
-      1 - 2 * (y * y + z * z), 2 * (x * y - z * w),     2 * (x * z + y * w),
-      2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
-      2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y)
-    ];
-  }
-
-  // --- HARTLEY-NORMALIZED HOMOGRAPHY SOLVER (4 OR MORE POINTS) ---
-  /**
-   * Normalizes both 2D ground coordinates and 2D image coordinates (centroid at origin, mean distance = sqrt(2))
-   * before solving DLT normal equations, eliminating floating-point ill-conditioning.
-   */
-  _computeNormalizedHomography(srcPts, dstPts) {
-    const N = srcPts.length;
-    if (N < 4) return null;
-
-    // 1. Compute centroids
-    let srcCx = 0, srcCz = 0, dstCx = 0, dstCy = 0;
-    for (let i = 0; i < N; i++) {
-      srcCx += srcPts[i].x;
-      srcCz += srcPts[i].z;
-      dstCx += dstPts[i].x;
-      dstCy += dstPts[i].y;
-    }
-    srcCx /= N; srcCz /= N;
-    dstCx /= N; dstCy /= N;
-
-    // 2. Compute mean distances from centroid
-    let srcMeanDist = 0, dstMeanDist = 0;
-    for (let i = 0; i < N; i++) {
-      srcMeanDist += Math.hypot(srcPts[i].x - srcCx, srcPts[i].z - srcCz);
-      dstMeanDist += Math.hypot(dstPts[i].x - dstCx, dstPts[i].y - dstCy);
-    }
-    srcMeanDist /= N;
-    dstMeanDist /= N;
-    if (srcMeanDist < 1e-12 || dstMeanDist < 1e-12) return null;
-
-    const srcScale = Math.SQRT2 / srcMeanDist;
-    const dstScale = Math.SQRT2 / dstMeanDist;
-
-    // 3. Build normalized system (AtA * h = AtB)
-    const AtA = Array.from({ length: 8 }, () => new Float64Array(8));
-    const AtB = new Float64Array(8);
-
-    for (let i = 0; i < N; i++) {
-      const X = (srcPts[i].x - srcCx) * srcScale;
-      const Z = (srcPts[i].z - srcCz) * srcScale;
-      const u = (dstPts[i].x - dstCx) * dstScale;
-      const v = (dstPts[i].y - dstCy) * dstScale;
-
-      const r1 = [X, Z, 1, 0, 0, 0, -u * X, -u * Z];
-      for (let j = 0; j < 8; j++) {
-        AtB[j] += r1[j] * u;
-        for (let k = 0; k < 8; k++) {
-          AtA[j][k] += r1[j] * r1[k];
+      for (let a = 0; a < nP; a++) {
+        for (let c = a; c < nP; c++) {
+          let s = 0;
+          for (let i = 0; i < m; i++) s += w[i] * J[a][i] * J[c][i];
+          Hm[a][c] = Hm[c][a] = s;
         }
       }
 
-      const r2 = [0, 0, 0, X, Z, 1, -v * X, -v * Z];
-      for (let j = 0; j < 8; j++) {
-        AtB[j] += r2[j] * v;
-        for (let k = 0; k < 8; k++) {
-          AtA[j][k] += r2[j] * r2[k];
-        }
-      }
-    }
-
-    const AtA_mat = Array.from({ length: 8 }, (_, r) => Array.from(AtA[r]));
-    const AtB_arr = Array.from(AtB);
-
-    const h = this._solveLinearSystem(AtA_mat, AtB_arr);
-    if (!h) return null;
-
-    const H_norm = [
-      [h[0], h[1], h[2]],
-      [h[3], h[4], h[5]],
-      [h[6], h[7], 1.0]
-    ];
-
-    // 4. Denormalize: H = T_dst^-1 * H_norm * T_src
-    const T_src = [
-      [srcScale, 0, -srcScale * srcCx],
-      [0, srcScale, -srcScale * srcCz],
-      [0, 0, 1]
-    ];
-    const T_dst_inv = [
-      [1 / dstScale, 0, dstCx],
-      [0, 1 / dstScale, dstCy],
-      [0, 0, 1]
-    ];
-
-    const H_temp = this._matMul3x3(H_norm, T_src);
-    return this._matMul3x3(T_dst_inv, H_temp);
-  }
-
-  _matMul3x3(A, B) {
-    const C = [
-      [0, 0, 0],
-      [0, 0, 0],
-      [0, 0, 0]
-    ];
-    for (let i = 0; i < 3; i++) {
-      for (let j = 0; j < 3; j++) {
-        C[i][j] = A[i][0] * B[0][j] + A[i][1] * B[1][j] + A[i][2] * B[2][j];
-      }
-    }
-    return C;
-  }
-
-  // --- OPENCV TO BABYLON.JS COORDINATE TRANSFORMATION ---
-  _convertCvToBabylon(R, T) {
-    // OpenCV camera: +X right, +Y down, +Z forward. Babylon camera: +X right, +Y up, +Z forward.
-    // Model frame has Y flipped w.r.t. the Babylon field frame, so R_bab = S * R * S with S = diag(1, -1, 1)
-    const posBabylon = {
-      x: T[0],
-      y: -T[1],
-      z: T[2]
-    };
-
-    const R_bab = [
-      [ R[0], -R[1],  R[2]],
-      [-R[3],  R[4], -R[5]],
-      [ R[6], -R[7],  R[8]]
-    ];
-
-    const q = this._quaternionFromMatrix(R_bab);
-
-    return {
-      position: posBabylon,
-      rotationQuaternion: q,
-      rawMatrix: R_bab,
-      timestamp: Date.now()
-    };
-  }
-
-  // --- ROTATION MATRIX TO QUATERNION ---
-  /**
-   * Converts a 3x3 column-vector rotation matrix (v' = R v) into a quaternion.
-   * Babylon's Matrix.Compose builds exactly this rotation from a quaternion (its row-major storage is
-   * the transpose, matched by its row-vector multiplication), so the standard formula applies as-is.
-   */
-  _quaternionFromMatrix(m) {
-    const m00 = m[0][0], m01 = m[0][1], m02 = m[0][2];
-    const m10 = m[1][0], m11 = m[1][1], m12 = m[1][2];
-    const m20 = m[2][0], m21 = m[2][1], m22 = m[2][2];
-    const tr = m00 + m11 + m22;
-
-    let x, y, z, w;
-    if (tr > 0) {
-      const S = Math.sqrt(tr + 1.0) * 2;
-      w = 0.25 * S;
-      x = (m21 - m12) / S;
-      y = (m02 - m20) / S;
-      z = (m10 - m01) / S;
-    } else if ((m00 > m11) && (m00 > m22)) {
-      const S = Math.sqrt(1.0 + m00 - m11 - m22) * 2;
-      w = (m21 - m12) / S;
-      x = 0.25 * S;
-      y = (m01 + m10) / S;
-      z = (m02 + m20) / S;
-    } else if (m11 > m22) {
-      const S = Math.sqrt(1.0 + m11 - m00 - m22) * 2;
-      w = (m02 - m20) / S;
-      x = (m01 + m10) / S;
-      y = 0.25 * S;
-      z = (m12 + m21) / S;
-    } else {
-      const S = Math.sqrt(1.0 + m22 - m00 - m11) * 2;
-      w = (m10 - m01) / S;
-      x = (m02 + m20) / S;
-      y = (m12 + m21) / S;
-      z = 0.25 * S;
-    }
-
-    const len = Math.hypot(x, y, z, w) || 1.0;
-    return { x: x / len, y: y / len, z: z / len, w: w / len };
-  }
-
-  _quaternionSlerp(qa, qb, t) {
-    let cosHalfTheta = qa.w * qb.w + qa.x * qb.x + qa.y * qb.y + qa.z * qb.z;
-
-    let bx = qb.x, by = qb.y, bz = qb.z, bw = qb.w;
-    if (cosHalfTheta < 0) {
-      bw = -bw; bx = -bx; by = -by; bz = -bz;
-      cosHalfTheta = -cosHalfTheta;
-    }
-
-    if (Math.abs(cosHalfTheta) >= 1.0) {
-      return { x: qa.x, y: qa.y, z: qa.z, w: qa.w };
-    }
-
-    const halfTheta = Math.acos(cosHalfTheta);
-    const sinHalfTheta = Math.sqrt(1.0 - cosHalfTheta * cosHalfTheta);
-
-    if (Math.abs(sinHalfTheta) < 0.001) {
-      const rx = qa.x * (1 - t) + bx * t;
-      const ry = qa.y * (1 - t) + by * t;
-      const rz = qa.z * (1 - t) + bz * t;
-      const rw = qa.w * (1 - t) + bw * t;
-      const len = Math.hypot(rx, ry, rz, rw) || 1.0;
-      return { x: rx / len, y: ry / len, z: rz / len, w: rw / len };
-    }
-
-    const ratioA = Math.sin((1 - t) * halfTheta) / sinHalfTheta;
-    const ratioB = Math.sin(t * halfTheta) / sinHalfTheta;
-
-    const rx = qa.x * ratioA + bx * ratioB;
-    const ry = qa.y * ratioA + by * ratioB;
-    const rz = qa.z * ratioA + bz * ratioB;
-    const rw = qa.w * ratioA + bw * ratioB;
-    const len = Math.hypot(rx, ry, rz, rw) || 1.0;
-
-    return {
-      x: rx / len,
-      y: ry / len,
-      z: rz / len,
-      w: rw / len
-    };
-  }
-
-  // --- GAUSSIAN ELIMINATION LINEAR EQUATION SOLVER ---
-  _solveLinearSystem(A, B) {
-    const n = B.length;
-    const M = A.map((row, i) => [...row, B[i]]);
-
-    for (let i = 0; i < n; i++) {
-      // Partial pivoting
-      let maxRow = i;
-      let maxVal = Math.abs(M[i][i]);
-      for (let r = i + 1; r < n; r++) {
-        if (Math.abs(M[r][i]) > maxVal) {
-          maxVal = Math.abs(M[r][i]);
-          maxRow = r;
-        }
-      }
-
-      if (maxVal < 1e-18) return null; // Singular matrix
-
-      if (maxRow !== i) {
-        const tmp = M[i];
-        M[i] = M[maxRow];
-        M[maxRow] = tmp;
-      }
-
-      const pivot = M[i][i];
-      for (let c = i; c <= n; c++) {
-        M[i][c] /= pivot;
-      }
-
-      for (let r = 0; r < n; r++) {
-        if (r !== i) {
-          const factor = M[r][i];
-          if (factor !== 0) {
-            for (let c = i; c <= n; c++) {
-              M[r][c] -= factor * M[i][c];
+      let accepted = false, gain = 0;
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const Ad = Hm.map((row, i) => row.map((v, j) => (i === j ? v * (1 + lambda) + 1e-12 : v)));
+        const delta = solveLinear(Ad, g);
+        if (delta) {
+          const cand = apply(st, delta);
+          const rc = residuals(cand, obs, f);
+          if (rc) {
+            const cc = robustCost(rc);
+            if (cc < cost) {
+              gain = cost - cc;
+              st = cand; r = rc; cost = cc;
+              lambda = Math.max(lambda / 3, 1e-9);
+              accepted = true;
+              break;
             }
           }
         }
+        lambda *= 4;
+      }
+      if (!accepted || gain < 1e-7 * cost + 1e-10) break;
+    }
+
+    let sum = 0;
+    for (let i = 0; i < m; i++) sum += r[i] * r[i];
+    st.cost = cost;
+    st.rms = Math.sqrt(sum / (m / 2));
+    return st;
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Device orientation (gyroscope) support
+  // ---------------------------------------------------------------------------------------------
+  // How the camera axes can sit relative to the device axes (rear or front camera, 4 screen rotations).
+  // The right one is found by comparing the sensor with what the markers show, so no assumption about
+  // the browser's screen-orientation conventions is needed.
+  const CAMERA_MOUNTS = (function () {
+    const list = [];
+    for (const base of [[1, 0, 0, 0, -1, 0, 0, 0, -1], [-1, 0, 0, 0, -1, 0, 0, 0, 1]]) {
+      for (let k = 0; k < 4; k++) list.push(mul(expSO3([0, 0, k * Math.PI / 2]), base));
+    }
+    return list;
+  })();
+
+  /** W3C DeviceOrientation angles (degrees) -> rotation matrix device -> earth. */
+  function deviceRotationMatrix(alpha, beta, gamma) {
+    const cZ = Math.cos(alpha * DEG), sZ = Math.sin(alpha * DEG);
+    const cX = Math.cos(beta * DEG), sX = Math.sin(beta * DEG);
+    const cY = Math.cos(gamma * DEG), sY = Math.sin(gamma * DEG);
+    return [
+      cZ * cY - sZ * sX * sY, -cX * sZ, cY * sZ * sX + cZ * sY,
+      cY * sZ + cZ * sX * sY, cZ * cX, sZ * sY - cZ * cY * sX,
+      -cX * sY, sX, cX * cY
+    ];
+  }
+
+  /** Camera rotation between two device orientations, for a given camera mount. */
+  function cameraDelta(mount, RdPrev, RdNow) {
+    return mul(transpose(mount), mul(mul(transpose(RdNow), RdPrev), mount));
+  }
+
+  /** Listens to the browser's device orientation events (phones / tablets). */
+  class DeviceRotationSensor {
+    constructor() {
+      this._R = null;
+      this._time = 0;
+      this._listening = false;
+      this._listen();
+    }
+
+    _listen() {
+      if (this._listening || typeof window === 'undefined' || !window.addEventListener) return;
+      this._listening = true;
+      window.addEventListener('deviceorientation', (e) => {
+        if (e.alpha === null || e.beta === null || e.gamma === null) return;
+        this._R = deviceRotationMatrix(e.alpha, e.beta, e.gamma);
+        this._time = performance.now();
+      }, true);
+    }
+
+    /** iOS only hands out orientation events after a permission prompt started by a user gesture. */
+    async requestPermission() {
+      try {
+        if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+          return (await DeviceOrientationEvent.requestPermission()) === 'granted';
+        }
+      } catch (err) {
+        console.warn('[ArUco] Device orientation permission:', err);
+        return false;
+      }
+      return true;
+    }
+
+    /** Latest device -> earth rotation, or null when there is no (fresh) sensor data. */
+    current() {
+      return this._R && performance.now() - this._time < 500 ? this._R : null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // The tracker
+  // ---------------------------------------------------------------------------------------------
+  class ArUcoFieldTracker {
+    constructor(options = {}) {
+      this.markerSizeMeters = options.markerSizeMeters || 0.25;
+      this.fovDegrees = options.fovDegrees || 65;   // across the LONGER side of the video
+      this.holdMs = options.holdMs || 1500;         // pose kept this long without markers (no sensor)
+      this.gyroHoldMs = options.gyroHoldMs || 20000; // ... and this long when the sensor follows rotation
+      this.minMarkerSidePx = 4;
+
+      // Smoothing: cutoff frequency (Hz) at rest, plus how much it opens up with motion
+      this.rotMinCutoff = 1.0; this.rotBeta = 0.05;  // per deg/s
+      this.posMinCutoff = 2.0; this.posBeta = 0.03;  // per px/s
+
+      this.isLocked = false;
+      this.reset();
+    }
+
+    /** Forget everything, including what was learned about the markers. */
+    reset() {
+      this.map = { yaw: {}, yawCount: {}, size: null, sizeCount: 0 };
+      this.isLocked = false;
+      this._gyro = { prev: null, scores: new Array(CAMERA_MOUNTS.length).fill(0), mount: -1, ref: null };
+      this._dropTracking();
+    }
+
+    _dropTracking() {
+      this.pose = null;      // smoothed { R, t }
+      this.raw = null;       // last accepted unsmoothed { R, t }
+      this._lastSolveTime = -Infinity;
+      this._jumps = 0;
+      this._lastInfo = null;
+    }
+
+    setMarkerSize(meters) {
+      const v = parseFloat(meters);
+      if (v > 0 && v !== this.markerSizeMeters) {
+        this.markerSizeMeters = v;
+        this.map.size = null;
+        this.map.sizeCount = 0;
       }
     }
 
-    return M.map(row => row[n]);
-  }
-}
+    setFov(degrees) {
+      const v = parseFloat(degrees);
+      if (v >= 20 && v <= 150) this.fovDegrees = v;
+    }
 
-// Global instantiation and export
-if (typeof window !== 'undefined') {
-  window.ArUcoPoseEstimator = ArUcoPoseEstimator;
-  window.arucoPoseEstimator = new ArUcoPoseEstimator();
-}
+    setLocked(locked) {
+      this.isLocked = !!locked && !!this.pose;
+      return this.isLocked;
+    }
+
+    toggleLock() {
+      return this.setLocked(!this.isLocked);
+    }
+
+    get gyroActive() {
+      return this._gyro.mount >= 0;
+    }
+
+    /** Pinhole intrinsics: square pixels, principal point at the image center. */
+    intrinsics(width, height) {
+      const f = (Math.max(width, height) / 2) / Math.tan(this.fovDegrees * DEG / 2);
+      return { f, cx: width / 2, cy: height / 2 };
+    }
+
+    /** Vertical field of view (radians) matching intrinsics(), for the 3D camera. */
+    verticalFov(width, height) {
+      return 2 * Math.atan((height / 2) / this.intrinsics(width, height).f);
+    }
+
+    /**
+     * Process one camera frame.
+     * @param {Object} frame
+     * @param {{key:string, corners:{x:number,y:number}[]}[]} frame.markers - detections already mapped to field keys
+     * @param {number} frame.width, frame.height - size of the image the corners refer to
+     * @param {Object} frame.field - { widthMeters, lengthMeters }
+     * @param {number} frame.time - milliseconds (monotonic)
+     * @param {number[]|null} [frame.deviceRotation] - device -> earth rotation from the orientation sensor
+     */
+    update(frame) {
+      const time = frame.time;
+      const K = this.intrinsics(frame.width, frame.height);
+      const obs = this._buildObservations(frame, K);
+
+      // 1. Predict: carry the pose along with the rotation reported by the orientation sensor
+      const G = this._gyroDelta(frame.deviceRotation || null);
+      if (G) {
+        for (const s of [this.pose, this.raw]) {
+          if (!s) continue;
+          s.R = orthonormalize(mul(G, s.R));
+          s.t = mulVec(G, s.t);
+        }
+      }
+
+      if (this.isLocked && this.pose) {
+        return this._result('locked', obs.length, K);
+      }
+
+      // 2. Measure
+      if (obs.length > 0) {
+        const recent = this.raw && time - this._lastSolveTime < 700;
+        const solved = this._solve(obs, K.f, recent ? this.raw : null);
+        if (solved) {
+          // A sudden large turn must persist for a few frames before it is believed
+          if (recent && rotAngle(solved.R, this.raw.R) > 25 * DEG && this._jumps < 3) {
+            this._jumps++;
+            return this._result('holding', obs.length, K);
+          }
+          this._jumps = 0;
+
+          this._learn(obs, solved);
+          this._checkGyro(solved.R, frame.deviceRotation || null, time);
+
+          let ax = 0, ay = 0;
+          for (const o of obs) { ax += o.c[0]; ay += o.c[1]; }
+          this._smooth(solved, [ax / obs.length, ay / obs.length, 0], K.f, time);
+
+          this.raw = { R: solved.R, t: solved.t };
+          this._lastSolveTime = time;
+          this._lastInfo = { rmsPx: solved.rms, keys: obs.map(o => o.key) };
+          return this._result('tracking', obs.length, K);
+        }
+      }
+
+      // 3. Nothing usable in this frame: hold for a while, then give up
+      const limit = this.gyroActive && G ? this.gyroHoldMs : this.holdMs;
+      if (this.pose && time - this._lastSolveTime <= limit) {
+        return this._result('holding', obs.length, K);
+      }
+      this._dropTracking();
+      return this._result('lost', obs.length, K);
+    }
+
+    _result(status, markerCount, K) {
+      const info = this._lastInfo || {};
+      return {
+        status,
+        markerCount,
+        pose: this.pose ? { R: this.pose.R.slice(), t: this.pose.t.slice() } : null,
+        camera: this.pose ? ArUcoFieldTracker.toFieldCamera(this.pose) : null,
+        rmsPx: status === 'tracking' ? info.rmsPx : null,
+        keys: status === 'tracking' ? info.keys : [],
+        gyro: this.gyroActive,
+        intrinsics: K
+      };
+    }
+
+    _buildObservations(frame, K) {
+      const layout = markerLayout(frame.field);
+      const byKey = new Map();
+      for (const m of frame.markers || []) {
+        if (!m || !layout[m.key] || !m.corners || m.corners.length !== 4) continue;
+        let side = 0;
+        for (let i = 0; i < 4; i++) {
+          const a = m.corners[i], b = m.corners[(i + 1) % 4];
+          side += Math.hypot(b.x - a.x, b.y - a.y) / 4;
+        }
+        if (!(side >= this.minMarkerSidePx)) continue;
+        const prev = byKey.get(m.key);
+        if (prev && prev.side >= side) continue; // same ID twice: keep the bigger one
+        byKey.set(m.key, {
+          key: m.key,
+          c: layout[m.key],
+          side,
+          img: m.corners.map(p => [(p.x - K.cx) / K.f, (p.y - K.cy) / K.f]),
+          yaw: this.map.yaw[m.key] || 0
+        });
+      }
+      return Array.from(byKey.values()).sort((a, b) => b.side - a.side);
+    }
+
+    // --- Pose from the markers of one frame ---
+    _solve(obs, f, ref) {
+      const multi = obs.length >= 2;
+      const size0 = this.map.size || this.markerSizeMeters;
+
+      for (let k = 0; k < obs.length; k++) {
+        obs[k].ippe = k < 4 ? ippeSquare(size0 / 2, obs[k].img) : [];
+      }
+
+      const seeds = [];
+      if (ref) seeds.push({ R: ref.R, t: ref.t, yaws: obs.map(o => o.yaw), size: size0 });
+
+      {
+        // From the biggest marker alone: its remembered (or default) turn on the ground fixes the heading
+        // of the field. With one marker this is all there is; with more it is just one more start.
+        const o = obs[0];
+        const Rz = expSO3([0, 0, -o.yaw]);
+        for (const sol of o.ippe) {
+          const R = mul(sol.R, Rz);
+          const Rc = mulVec(R, [o.c[0], o.c[1], 0]);
+          seeds.push({
+            R, t: [sol.t[0] - Rc[0], sol.t[1] - Rc[1], sol.t[2] - Rc[2]],
+            yaws: obs.map(ob => ob.yaw), size: size0
+          });
+        }
+      }
+      if (multi) {
+        // Several markers: the direction between two marker centers fixes the heading, so the turn of
+        // the individual markers is not needed
+        const a = obs[0];
+        let b = null, far = -1;
+        for (let k = 1; k < obs.length; k++) {
+          const d = Math.hypot(obs[k].c[0] - a.c[0], obs[k].c[1] - a.c[1]);
+          if (obs[k].ippe.length && d > far) { far = d; b = obs[k]; }
+        }
+        if (b && a.ippe.length) {
+          for (const sa of a.ippe) seeds.push(this._pairSeed(a, sa, b, b.ippe[0].t, obs, size0));
+          for (const sb of b.ippe) seeds.push(this._pairSeed(b, sb, a, a.ippe[0].t, obs, size0));
+        }
+      }
+
+      const cands = [];
+      for (const seed of seeds) {
+        if (!seed) continue;
+        const fit = refine(seed, obs, f, multi);
+        if (!fit) continue;
+        // The camera has to be above the ground
+        if (!(-(fit.R[2] * fit.t[0] + fit.R[5] * fit.t[1] + fit.R[8] * fit.t[2]) > 0)) continue;
+        cands.push(fit);
+      }
+      if (!cands.length) return null;
+
+      let best = cands[0];
+      for (const c of cands) if (c.cost < best.cost) best = c;
+
+      // Candidates that explain the image about as well as the best one
+      const tol = best.cost * 1.5 + 0.25 * obs.length * 4;
+      let plausible = cands.filter(c => c.cost <= tol);
+      if (plausible.length > 1) {
+        // World "up" has to point up in the image (R[5] is its image-y component): rules out the tilt flip
+        const upMin = Math.min.apply(null, plausible.map(c => c.R[5]));
+        plausible = plausible.filter(c => c.R[5] <= upMin + 0.35);
+      }
+      let chosen = plausible[0];
+      for (const c of plausible) {
+        if (ref ? rotAngle(c.R, ref.R) < rotAngle(chosen.R, ref.R) : c.cost < chosen.cost) chosen = c;
+      }
+      return chosen;
+    }
+
+    /** Starting pose from marker a's plane and the direction from marker a to marker b. */
+    _pairSeed(a, sa, b, tb, obs, size0) {
+      const n = [sa.R[2], sa.R[5], sa.R[8]];
+      const d = [tb[0] - sa.t[0], tb[1] - sa.t[1], tb[2] - sa.t[2]];
+      const dn = dot(d, n);
+      const dp = [d[0] - dn * n[0], d[1] - dn * n[1], d[2] - dn * n[2]];
+      const len = Math.hypot(dp[0], dp[1], dp[2]);
+      const mx = b.c[0] - a.c[0], my = b.c[1] - a.c[1];
+      const ml = Math.hypot(mx, my);
+      if (!(len > 1e-9) || !(ml > 1e-9)) return null;
+
+      const e1 = [dp[0] / len, dp[1] / len, dp[2] / len];
+      const e2 = cross(n, e1);
+      const m1 = [mx / ml, my / ml], m2 = [-my / ml, mx / ml];
+      // R maps ground axes (m1, m2, up) onto camera axes (e1, e2, n)
+      const R = orthonormalize([
+        e1[0] * m1[0] + e2[0] * m2[0], e1[0] * m1[1] + e2[0] * m2[1], n[0],
+        e1[1] * m1[0] + e2[1] * m2[0], e1[1] * m1[1] + e2[1] * m2[1], n[1],
+        e1[2] * m1[0] + e2[2] * m2[0], e1[2] * m1[1] + e2[2] * m2[1], n[2]
+      ]);
+      // If the real marker size differs from the assumed one all distances are off by the same factor
+      const rho = ml / len;
+      const Rc = mulVec(R, [a.c[0], a.c[1], 0]);
+      const t = [rho * sa.t[0] - Rc[0], rho * sa.t[1] - Rc[1], rho * sa.t[2] - Rc[2]];
+
+      // Turn of each marker on the ground, read off its own pose
+      const yaws = obs.map(o => {
+        let pick = null, align = -Infinity;
+        for (const s of o.ippe) {
+          const al = s.R[2] * n[0] + s.R[5] * n[1] + s.R[8] * n[2];
+          if (al > align) { align = al; pick = s; }
+        }
+        if (!pick) return o.yaw;
+        const v = tMulVec(R, [pick.R[0], pick.R[3], pick.R[6]]);
+        return Math.atan2(v[1], v[0]);
+      });
+      return { R, t, yaws, size: size0 * rho };
+    }
+
+    /** Remember how each marker is turned and how big the markers really are. */
+    _learn(obs, solved) {
+      if (obs.length < 2 || !(solved.rms < 4)) return;
+      const map = this.map;
+      for (let k = 0; k < obs.length; k++) {
+        const key = obs[k].key;
+        const cnt = map.yawCount[key] || 0;
+        const a = Math.max(0.05, 1 / (cnt + 1));
+        const old = cnt ? map.yaw[key] : solved.yaws[k];
+        let diff = solved.yaws[k] - old;
+        diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+        map.yaw[key] = old + a * diff;
+        map.yawCount[key] = cnt + 1;
+      }
+      const a = Math.max(0.03, 1 / (map.sizeCount + 1));
+      map.size = map.sizeCount ? map.size * Math.pow(solved.size / map.size, a) : solved.size;
+      map.sizeCount++;
+    }
+
+    // --- Smoothing ---
+    /**
+     * Rotation and the camera-space position of the visible markers' centroid are filtered separately and
+     * the translation is rebuilt from them, so smoothing never drags the course off the markers in view.
+     */
+    _smooth(meas, anchor, f, time) {
+      const dtMs = time - this._lastSolveTime;
+      if (!this.pose || dtMs > 500) {
+        this.pose = { R: meas.R.slice(), t: meas.t.slice() };
+        return;
+      }
+      const dt = Math.max(0.005, Math.min(0.25, dtMs / 1000));
+      const P = this.pose;
+      const rp = mulVec(P.R, anchor), rm = mulVec(meas.R, anchor);
+      const aP = [rp[0] + P.t[0], rp[1] + P.t[1], rp[2] + P.t[2]];
+      const aM = [rm[0] + meas.t[0], rm[1] + meas.t[1], rm[2] + meas.t[2]];
+
+      const angDeg = rotAngle(P.R, meas.R) / DEG;
+      const zP = Math.max(1e-6, aP[2]), zM = Math.max(1e-6, aM[2]);
+      const px = f * Math.hypot(aM[0] / zM - aP[0] / zP, aM[1] / zM - aP[1] / zP)
+        + 0.25 * f * Math.abs(zM - zP) / zM;
+
+      const alpha = (cutoff) => 1 - Math.exp(-2 * Math.PI * cutoff * dt);
+      const aR = alpha(this.rotMinCutoff + this.rotBeta * angDeg / dt);
+      const aT = alpha(this.posMinCutoff + this.posBeta * px / dt);
+
+      const R = slerp(P.R, meas.R, aR);
+      const a = [aP[0] + (aM[0] - aP[0]) * aT, aP[1] + (aM[1] - aP[1]) * aT, aP[2] + (aM[2] - aP[2]) * aT];
+      const ra = mulVec(R, anchor);
+      this.pose = { R, t: [a[0] - ra[0], a[1] - ra[1], a[2] - ra[2]] };
+    }
+
+    // --- Orientation sensor ---
+    /** Camera rotation since the previous frame according to the sensor (null until it is verified). */
+    _gyroDelta(Rd) {
+      const g = this._gyro;
+      const prev = g.prev;
+      g.prev = Rd;
+      if (!Rd || !prev || g.mount < 0) return null;
+      return cameraDelta(CAMERA_MOUNTS[g.mount], prev, Rd);
+    }
+
+    /**
+     * Compares how the camera turned according to the markers with what the sensor says for each possible
+     * camera mount. The sensor is only used once one mount keeps agreeing with the markers.
+     */
+    _checkGyro(R, Rd, time) {
+      const g = this._gyro;
+      if (!Rd) { g.ref = null; return; }
+      if (!g.ref || time - g.ref.time > 1500) { g.ref = { R, Rd, time }; return; }
+
+      const V = mul(R, transpose(g.ref.R));
+      const ang = Math.acos(Math.max(-1, Math.min(1, (V[0] + V[4] + V[8] - 1) / 2)));
+      if (ang < 4 * DEG) return; // not enough motion yet to tell anything
+
+      const tol = Math.max(2.5 * DEG, 0.35 * ang);
+      for (let i = 0; i < CAMERA_MOUNTS.length; i++) {
+        const agrees = rotAngle(V, cameraDelta(CAMERA_MOUNTS[i], g.ref.Rd, Rd)) < tol;
+        g.scores[i] = Math.max(-5, Math.min(20, g.scores[i] + (agrees ? 1 : -1)));
+      }
+      g.ref = { R, Rd, time };
+
+      let best = 0, second = -Infinity;
+      for (let i = 1; i < g.scores.length; i++) if (g.scores[i] > g.scores[best]) best = i;
+      for (let i = 0; i < g.scores.length; i++) if (i !== best) second = Math.max(second, g.scores[i]);
+      if (g.scores[best] >= 6 && g.scores[best] - second >= 3) g.mount = best;
+      else if (g.mount >= 0 && g.scores[g.mount] < 2) g.mount = -1;
+    }
+
+    // --- Output helpers ---
+    /**
+     * Where the camera is in the field (Babylon) frame.
+     * `axes` holds the camera's right / up / forward directions as rows, i.e. the 3x3 rotation block of a
+     * Babylon world matrix; `position` is the camera position.
+     */
+    static toFieldCamera(pose) {
+      const R = pose.R, t = pose.t;
+      const C = tMulVec(R, [-t[0], -t[1], -t[2]]); // camera center on the ground frame
+      return {
+        position: [C[0], C[2], C[1]],
+        axes: [
+          R[0], R[2], R[1],
+          -R[3], -R[5], -R[4],
+          R[6], R[8], R[7]
+        ]
+      };
+    }
+
+    /** Pixel position of a field-frame point (x east, y up, z north); null if behind the camera. */
+    static projectFieldPoint(pose, K, x, y, z) {
+      const R = pose.R, t = pose.t;
+      const pz = R[6] * x + R[7] * z + R[8] * y + t[2];
+      if (!(pz > 1e-6)) return null;
+      return {
+        x: K.cx + K.f * (R[0] * x + R[1] * z + R[2] * y + t[0]) / pz,
+        y: K.cy + K.f * (R[3] * x + R[4] * z + R[5] * y + t[1]) / pz
+      };
+    }
+  }
+
+  const api = {
+    ArUcoFieldTracker,
+    DeviceRotationSensor,
+    markerLayout,
+    ippeSquare,
+    deviceRotationMatrix,
+    CAMERA_MOUNTS,
+    CORNER_SIGNS,
+    math: { mul, mulVec, tMulVec, transpose, expSO3, rotAngle, orthonormalize, slerp }
+  };
+
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = api;
+  }
+  if (typeof window !== 'undefined') {
+    window.ArUcoPose = api;
+    window.ArUcoFieldTracker = ArUcoFieldTracker;
+    window.arucoFieldTracker = new ArUcoFieldTracker();
+    window.arucoDeviceRotation = new DeviceRotationSensor();
+  }
+})(typeof globalThis !== 'undefined' ? globalThis : this);

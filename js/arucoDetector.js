@@ -1,299 +1,280 @@
 /**
- * Agility Course Designer - ArUco 4x4 Marker Detector
- * Real-time OpenCV.js 4.x WebAssembly computer vision detector.
+ * Agility Course Designer - ArUco camera detector
+ *
+ * Owns the camera stream and the per-frame loop of the ArUco tab:
+ *   grab a video frame -> draw it on the output canvas -> detect 4x4 ArUco markers with OpenCV.js ->
+ *   hand the detections to `onFrame` (which positions and renders the 3D course) -> outline the markers.
+ *
+ * The frame that is shown is always the frame that was analyzed, and the 3D overlay is rendered in the same
+ * tick, so video and overlay never run out of step with each other.
  */
 
 // Global detector instance
 var detector = null;
 
-/**
- * Class to detect 4x4 ArUco markers in real-time over a camera feed using OpenCV.js.
- */
-class Aruco4x4Detector {
+class ArucoCameraDetector {
   /**
-   * @param {HTMLVideoElement} videoElement - Video element receiving camera input.
-   * @param {HTMLCanvasElement} canvasElement - Canvas element for rendering output.
+   * @param {HTMLVideoElement} video - receives the camera stream (kept hidden)
+   * @param {HTMLCanvasElement} canvas - shows the analyzed frames
    * @param {Object} [options]
-   * @param {number} [options.dictType=cv.DICT_4X4_50] - Predefined ArUco 4x4 dictionary.
-   * @param {Function} [options.onDetect] - Callback per frame with detected markers.
+   * @param {Function} [options.onFrame] - called per frame with { markers, width, height, time }
+   * @param {Function} [options.onResize] - called with (width, height) when the video size is known/changes
    */
-  constructor(videoElement, canvasElement, options = {}) {
+  constructor(video, canvas, options = {}) {
     if (typeof cv === 'undefined' || !cv.Mat) {
       throw new Error('OpenCV.js runtime is not loaded yet.');
     }
+    this.video = video;
+    this.canvas = canvas;
+    this.onFrame = options.onFrame || null;
+    this.onResize = options.onResize || null;
+    this.ctx = canvas.getContext('2d', { willReadFrequently: true });
 
-    this.video = videoElement;
-    this.canvas = canvasElement;
-    this.onDetect = options.onDetect || null;
+    this._initOpenCv();
 
-    // Set 4x4 Dictionary
-    const dictId = options.dictType !== undefined ? options.dictType : (cv.DICT_4X4_50 ?? 0);
-    const getDictFn = cv.getPredefinedDictionary || cv.aruco_getPredefinedDictionary;
-    this.dictionary = getDictFn ? getDictFn(dictId) : null;
-
-    // ArUco Parameters
-    const DetectorParamsClass = cv.aruco_DetectorParameters || cv.DetectorParameters;
-    this.detectorParams = DetectorParamsClass ? new DetectorParamsClass() : null;
-    if (this.detectorParams) {
-      // Enable subpixel corner refinement to drastically reduce 3D pose jitter
-      if (typeof cv.CORNER_REFINE_SUBPIX !== 'undefined') {
-        this.detectorParams.cornerRefinementMethod = cv.CORNER_REFINE_SUBPIX;
-      } else {
-        this.detectorParams.cornerRefinementMethod = 1; // 1 = CORNER_REFINE_SUBPIX in OpenCV 4.x
-      }
-      this.detectorParams.cornerRefinementWinSize = 5;
-      this.detectorParams.cornerRefinementMaxIterations = 30;
-      this.detectorParams.cornerRefinementMinAccuracy = 0.05;
-      this.detectorParams.adaptiveThreshWinSizeMin = 3;
-      this.detectorParams.adaptiveThreshWinSizeMax = 23;
-      this.detectorParams.adaptiveThreshWinSizeStep = 10;
-      this.detectorParams.minMarkerPerimeterRate = 0.02;
-    }
-
-    const RefineParamsClass = cv.aruco_RefineParameters || cv.RefineParameters;
-    this.refineParams = RefineParamsClass ? new RefineParamsClass(10.0, 3.0, true) : null;
-
-    // Initialize Detector
-    const ArucoDetectorClass = cv.ArucoDetector || cv.aruco_ArucoDetector;
-    if (ArucoDetectorClass && this.dictionary && this.detectorParams) {
-      if (this.refineParams) {
-        this.detector = new ArucoDetectorClass(this.dictionary, this.detectorParams, this.refineParams);
-      } else {
-        this.detector = new ArucoDetectorClass(this.dictionary, this.detectorParams);
-      }
-    } else {
-      this.detector = null;
-    }
-
-    this.cap = null;
-    this.src = null;
-    this.rgb = null;
+    this.rgba = null;
     this.gray = null;
+    this.width = 0;
+    this.height = 0;
+    this.isRunning = false;
+    this._raf = null;
+    this._ownsStream = false;
+    this._lastErrorLog = 0;
+
+    // Keep the stage (video + 3D overlay) at exactly the video's aspect ratio inside its wrapper
+    this.stage = document.getElementById('aruco-canvas-stage');
+    this.wrapper = this.stage ? this.stage.parentElement : null;
+    this._fitStage = this._fitStage.bind(this);
+    if (this.wrapper && typeof ResizeObserver !== 'undefined') {
+      new ResizeObserver(this._fitStage).observe(this.wrapper);
+    }
+    window.addEventListener('resize', this._fitStage);
+  }
+
+  _initOpenCv() {
+    const getDict = cv.getPredefinedDictionary || cv.aruco_getPredefinedDictionary;
+    const Params = cv.aruco_DetectorParameters || cv.DetectorParameters;
+    const Refine = cv.aruco_RefineParameters || cv.RefineParameters;
+    const Detector = cv.aruco_ArucoDetector || cv.ArucoDetector;
+    if (!getDict || !Params) {
+      throw new Error('This OpenCV.js build has no ArUco module.');
+    }
+
+    this.dictionary = getDict(typeof cv.DICT_4X4_50 !== 'undefined' ? cv.DICT_4X4_50 : 0);
+    this.params = new Params();
+    // Sub-pixel corners: corner noise is what makes a pose jitter
+    this.params.cornerRefinementMethod = typeof cv.CORNER_REFINE_SUBPIX !== 'undefined' ? cv.CORNER_REFINE_SUBPIX : 1;
+    this.params.cornerRefinementWinSize = 5;
+    this.params.cornerRefinementMaxIterations = 30;
+    this.params.cornerRefinementMinAccuracy = 0.05;
+    this.params.adaptiveThreshWinSizeMin = 3;
+    this.params.adaptiveThreshWinSizeMax = 23;
+    this.params.adaptiveThreshWinSizeStep = 10;
+    this.params.minMarkerPerimeterRate = 0.02;
+
+    this.refineParams = Refine ? new Refine(10.0, 3.0, true) : null;
+    this.arucoDetector = null;
+    if (Detector) {
+      this.arucoDetector = this.refineParams
+        ? new Detector(this.dictionary, this.params, this.refineParams)
+        : new Detector(this.dictionary, this.params);
+    } else if (!(cv.detectMarkers || cv.aruco_detectMarkers)) {
+      throw new Error('This OpenCV.js build has no ArUco detection function.');
+    }
+
     this.corners = new cv.MatVector();
     this.ids = new cv.Mat();
     this.rejected = new cv.MatVector();
-
-    this.isRunning = false;
-    this.animationFrameId = null;
   }
 
   /**
-   * Starts camera stream and detection loop.
+   * Starts the camera and the detection loop.
+   * @param {MediaStreamConstraints|{stream: MediaStream}} [source] - getUserMedia constraints, or an
+   *        existing stream to analyze
    */
-  async start(constraints = { video: { width: 640, height: 480 } }) {
-    if (this.isRunning) return;
+  async start(source = { video: { facingMode: { ideal: 'environment' } } }) {
+    if (this.isRunning) this.stop();
 
-    if (!this.video.srcObject) {
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      this.video.srcObject = stream;
+    if (source && source.stream) {
+      this.video.srcObject = source.stream;
+      this._ownsStream = false;
+    } else {
+      this.video.srcObject = await navigator.mediaDevices.getUserMedia(source);
+      this._ownsStream = true;
     }
 
-    await new Promise((resolve) => {
-      if (this.video.readyState >= 2 && this.video.videoWidth > 0) {
-        this.video.play();
-        resolve();
-      } else {
-        this.video.onplaying = () => resolve();
-        this.video.play();
-      }
+    await new Promise((resolve, reject) => {
+      const done = () => { this.video.removeEventListener('loadeddata', done); resolve(); };
+      if (this.video.readyState >= 2 && this.video.videoWidth > 0) resolve();
+      else this.video.addEventListener('loadeddata', done);
+      const p = this.video.play();
+      if (p && typeof p.catch === 'function') p.catch(reject);
     });
 
-    const width = this.video.videoWidth;
-    const height = this.video.videoHeight;
-    this.video.width = width;
-    this.video.height = height;
-    this.canvas.width = width;
-    this.canvas.height = height;
-
-    const babylonArCanvas = document.getElementById('aruco-babylon-canvas');
-    if (babylonArCanvas) {
-      babylonArCanvas.width = width;
-      babylonArCanvas.height = height;
-    }
-    if (window.agilityApp && window.agilityApp.arucoBabylonEngine) {
-      window.agilityApp.arucoBabylonEngine.resize();
-    }
-
-    this.cap = new cv.VideoCapture(this.video);
-    if (this.src) this.src.delete();
-    if (this.rgb) this.rgb.delete();
-    if (this.gray) this.gray.delete();
-
-    this.src = new cv.Mat(height, width, cv.CV_8UC4);
-    this.rgb = new cv.Mat(height, width, cv.CV_8UC3);
-    this.gray = new cv.Mat(height, width, cv.CV_8UC1);
-
     this.isRunning = true;
-    this._loop();
+    this._tick();
   }
 
-  _loop = () => {
-    if (!this.isRunning) return;
-    this.processFrame();
-    this.animationFrameId = requestAnimationFrame(this._loop);
-  };
-
-  /**
-   * Captures a single frame, processes markers, and updates canvas.
-   */
-  processFrame() {
-    if (!this.isRunning || this.video.readyState < 2) return;
-
-    try {
-      const vWidth = this.video.videoWidth;
-      const vHeight = this.video.videoHeight;
-      if (vWidth === 0 || vHeight === 0) return;
-
-      if (this.src.cols !== vWidth || this.src.rows !== vHeight) {
-        this.src.delete();
-        this.rgb.delete();
-        this.gray.delete();
-        this.video.width = vWidth;
-        this.video.height = vHeight;
-        this.canvas.width = vWidth;
-        this.canvas.height = vHeight;
-
-        const babylonArCanvas = document.getElementById('aruco-babylon-canvas');
-        if (babylonArCanvas) {
-          babylonArCanvas.width = vWidth;
-          babylonArCanvas.height = vHeight;
-        }
-        if (window.agilityApp && window.agilityApp.arucoBabylonEngine) {
-          window.agilityApp.arucoBabylonEngine.resize();
-        }
-
-        this.src = new cv.Mat(vHeight, vWidth, cv.CV_8UC4);
-        this.rgb = new cv.Mat(vHeight, vWidth, cv.CV_8UC3);
-        this.gray = new cv.Mat(vHeight, vWidth, cv.CV_8UC1);
-      }
-
-      this.cap.read(this.src);
-      cv.cvtColor(this.src, this.rgb, cv.COLOR_RGBA2RGB);
-      cv.cvtColor(this.src, this.gray, cv.COLOR_RGBA2GRAY);
-
-      // Detection step
-      if (this.detector && typeof this.detector.detectMarkers === 'function') {
-        this.detector.detectMarkers(this.gray, this.corners, this.ids, this.rejected);
-      } else {
-        const detectFn = cv.detectMarkers || cv.aruco_detectMarkers;
-        if (!detectFn) {
-          throw new Error('ArUco detection functions are not available in this OpenCV build.');
-        }
-        detectFn(this.gray, this.dictionary, this.corners, this.ids, this.detectorParams, this.rejected);
-      }
-
-      const detectedMarkers = [];
-
-      if (this.ids.rows > 0) {
-        const drawFn = cv.drawDetectedMarkers || cv.aruco_drawDetectedMarkers;
-        if (drawFn) {
-          drawFn(this.rgb, this.corners, this.ids);
-        }
-
-        for (let i = 0; i < this.ids.rows; ++i) {
-          const id = this.ids.data32S[i];
-          const cornerMat = this.corners.get(i);
-          const points = [];
-
-          for (let j = 0; j < 4; j++) {
-            points.push({
-              x: cornerMat.data32F[j * 2],
-              y: cornerMat.data32F[j * 2 + 1]
-            });
-          }
-
-          // Calculate true center
-          const center = {
-            x: (points[0].x + points[1].x + points[2].x + points[3].x) / 4,
-            y: (points[0].y + points[1].y + points[2].y + points[3].y) / 4
-          };
-
-          detectedMarkers.push({ id, corners: points, center });
-          cornerMat.delete();
-        }
-      }
-
-      cv.imshow(this.canvas, this.rgb);
-
-      // Always notify onDetect so pose estimator can handle tracking, grace period, and anchor holding
-      if (this.onDetect) {
-        this.onDetect(detectedMarkers);
-      }
-    } catch (err) {
-      const errorMsg = (typeof cv.exceptionFromPtr === 'function' && typeof err === 'number')
-        ? cv.exceptionFromPtr(err).msg
-        : (err.message || err);
-      console.error('ArUco Detection error:', errorMsg);
-    }
-  }
-
-  /**
-   * Stops the camera feed and rendering loop without destroying OpenCV structures.
-   */
+  /** Stops the loop and the camera; OpenCV objects are kept for the next start. */
   stop() {
     this.isRunning = false;
-    if (this.animationFrameId) {
-      cancelAnimationFrame(this.animationFrameId);
-      this.animationFrameId = null;
+    if (this._raf) {
+      cancelAnimationFrame(this._raf);
+      this._raf = null;
     }
-
-    if (this.video.srcObject) {
-      const tracks = this.video.srcObject.getTracks();
-      tracks.forEach((track) => track.stop());
+    const stream = this.video.srcObject;
+    if (stream) {
+      if (this._ownsStream) stream.getTracks().forEach(track => track.stop());
       this.video.srcObject = null;
     }
-
-    // Clean frame matrices only
-    if (this.src) { this.src.delete(); this.src = null; }
-    if (this.rgb) { this.rgb.delete(); this.rgb = null; }
-    if (this.gray) { this.gray.delete(); this.gray = null; }
+    this._releaseFrames();
   }
 
-  /**
-   * Fully releases all WebAssembly C++ memory handles when closing or unloading.
-   */
+  /** Releases all WebAssembly memory. */
   destroy() {
     this.stop();
+    for (const name of ['corners', 'ids', 'rejected', 'arucoDetector', 'params', 'refineParams', 'dictionary']) {
+      if (this[name]) { this[name].delete(); this[name] = null; }
+    }
+  }
 
-    if (this.corners) { this.corners.delete(); this.corners = null; }
-    if (this.ids) { this.ids.delete(); this.ids = null; }
-    if (this.rejected) { this.rejected.delete(); this.rejected = null; }
-    if (this.detector) { this.detector.delete(); this.detector = null; }
-    if (this.detectorParams) { this.detectorParams.delete(); this.detectorParams = null; }
-    if (this.refineParams) { this.refineParams.delete(); this.refineParams = null; }
-    if (this.dictionary) { this.dictionary.delete(); this.dictionary = null; }
+  _releaseFrames() {
+    if (this.rgba) { this.rgba.delete(); this.rgba = null; }
+    if (this.gray) { this.gray.delete(); this.gray = null; }
+    this.width = 0;
+    this.height = 0;
+  }
+
+  _tick = () => {
+    if (!this.isRunning) return;
+    try {
+      this._processFrame();
+    } catch (err) {
+      const now = performance.now();
+      if (now - this._lastErrorLog > 2000) {
+        this._lastErrorLog = now;
+        const msg = (typeof err === 'number' && typeof cv.exceptionFromPtr === 'function')
+          ? cv.exceptionFromPtr(err).msg
+          : (err && err.message) || err;
+        console.error('[ArUco] Frame processing error:', msg);
+      }
+    }
+    this._raf = requestAnimationFrame(this._tick);
+  };
+
+  _processFrame() {
+    const video = this.video;
+    const w = video.videoWidth, h = video.videoHeight;
+    if (video.readyState < 2 || !w || !h) return;
+
+    if (w !== this.width || h !== this.height) {
+      // First frame, or the stream changed size (e.g. the phone was rotated)
+      this._releaseFrames();
+      this.width = w;
+      this.height = h;
+      this.canvas.width = w;
+      this.canvas.height = h;
+      this.rgba = new cv.Mat(h, w, cv.CV_8UC4);
+      this.gray = new cv.Mat(h, w, cv.CV_8UC1);
+      this._fitStage();
+      if (this.onResize) this.onResize(w, h);
+    }
+
+    // 1. Grab
+    const ctx = this.ctx;
+    ctx.drawImage(video, 0, 0, w, h);
+    this.rgba.data.set(ctx.getImageData(0, 0, w, h).data);
+    cv.cvtColor(this.rgba, this.gray, cv.COLOR_RGBA2GRAY);
+
+    // 2. Detect
+    if (this.arucoDetector) {
+      this.arucoDetector.detectMarkers(this.gray, this.corners, this.ids, this.rejected);
+    } else {
+      (cv.detectMarkers || cv.aruco_detectMarkers)(this.gray, this.dictionary, this.corners, this.ids, this.params, this.rejected);
+    }
+
+    const markers = [];
+    for (let i = 0; i < this.ids.rows; i++) {
+      const mat = this.corners.get(i);
+      const d = mat.data32F;
+      const corners = [];
+      let cx = 0, cy = 0;
+      for (let j = 0; j < 4; j++) {
+        corners.push({ x: d[j * 2], y: d[j * 2 + 1] });
+        cx += d[j * 2] / 4;
+        cy += d[j * 2 + 1] / 4;
+      }
+      mat.delete();
+      markers.push({ id: this.ids.data32S[i], corners, center: { x: cx, y: cy } });
+    }
+
+    // 3. Position + render the 3D course for exactly this frame
+    if (this.onFrame) {
+      this.onFrame({ markers, width: w, height: h, time: performance.now() });
+    }
+
+    // 4. Outline what was detected
+    this._drawMarkers(markers);
+  }
+
+  _drawMarkers(markers) {
+    if (!markers.length) return;
+    const ctx = this.ctx;
+    const lw = Math.max(2, Math.round(this.width / 480));
+    ctx.save();
+    ctx.lineJoin = 'round';
+    ctx.font = `600 ${Math.max(14, Math.round(this.width / 60))}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (const m of markers) {
+      const c = m.corners;
+      ctx.beginPath();
+      ctx.moveTo(c[0].x, c[0].y);
+      for (let j = 1; j < 4; j++) ctx.lineTo(c[j].x, c[j].y);
+      ctx.closePath();
+      ctx.lineWidth = lw;
+      ctx.strokeStyle = '#22e36b';
+      ctx.stroke();
+      // First corner (the marker's own top-left)
+      ctx.fillStyle = '#ff3b6b';
+      ctx.fillRect(c[0].x - lw * 1.5, c[0].y - lw * 1.5, lw * 3, lw * 3);
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.75)';
+      ctx.strokeText(String(m.id), m.center.x, m.center.y);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(String(m.id), m.center.x, m.center.y);
+    }
+    ctx.restore();
+  }
+
+  /** Sizes the stage to the largest box of the video's aspect ratio that fits in the wrapper. */
+  _fitStage() {
+    if (!this.stage || !this.wrapper || !this.width || !this.height) return;
+    const availW = this.wrapper.clientWidth, availH = this.wrapper.clientHeight;
+    if (!availW || !availH) return;
+    const scale = Math.min(availW / this.width, availH / this.height);
+    this.stage.style.width = `${Math.max(1, Math.floor(this.width * scale))}px`;
+    this.stage.style.height = `${Math.max(1, Math.floor(this.height * scale))}px`;
   }
 }
 
 /**
- * Robust initializer that ensures DOM and OpenCV WebAssembly runtime are both ready.
+ * Creates the detector once both the DOM and the OpenCV WebAssembly runtime are ready.
  */
 function setupArucoDetector() {
   if (window._arucoDetectorInitialized) return true;
-
-  if (typeof cv === 'undefined' || !cv.Mat) {
-    return false;
-  }
+  if (typeof cv === 'undefined' || !cv.Mat) return false;
 
   const video = document.getElementById('webcam');
   const canvas = document.getElementById('outputCanvas');
-  if (!video || !canvas) {
-    return false;
-  }
+  if (!video || !canvas) return false;
 
   try {
-    const dictId = (typeof cv.DICT_4X4_50 !== 'undefined') ? cv.DICT_4X4_50 : 0;
-
-    detector = new Aruco4x4Detector(video, canvas, {
-      dictType: dictId,
-      onDetect: (markers) => {
-        if (window.arucoTracker) {
-          window.arucoTracker.handleDetections(markers);
-        }
-        if (window.agilityApp && typeof window.agilityApp.onArMarkersDetected === 'function') {
-          const w = canvas.width || 1280;
-          const h = canvas.height || 720;
-          window.agilityApp.onArMarkersDetected(markers, w, h);
+    detector = new ArucoCameraDetector(video, canvas, {
+      onFrame: (frame) => {
+        if (window.arucoTracker) window.arucoTracker.handleDetections(frame.markers);
+        if (window.agilityApp && typeof window.agilityApp.onArFrame === 'function') {
+          window.agilityApp.onArFrame(frame);
         }
       }
     });
@@ -304,10 +285,12 @@ function setupArucoDetector() {
     if (startBtn) {
       startBtn.disabled = false;
       startBtn.onclick = () => {
+        // Must be requested from a user gesture (iOS); harmless elsewhere
+        if (window.arucoDeviceRotation) window.arucoDeviceRotation.requestPermission();
         if (window.arucoTracker) {
           window.arucoTracker.startCamera();
         } else {
-          detector.start({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } });
+          detector.start();
         }
       };
     }
@@ -315,8 +298,9 @@ function setupArucoDetector() {
     if (stopBtn) {
       stopBtn.onclick = () => {
         detector.stop();
-        if (window.arucoTracker) {
-          window.arucoTracker.onCameraStopped();
+        if (window.arucoTracker) window.arucoTracker.onCameraStopped();
+        if (window.agilityApp && typeof window.agilityApp.onArStopped === 'function') {
+          window.agilityApp.onArStopped();
         }
       };
     }
@@ -333,14 +317,14 @@ function setupArucoDetector() {
       }
     }
 
-    console.log('[ArUco] OpenCV 4.x runtime and Aruco4x4Detector initialized successfully.');
+    console.log('[ArUco] OpenCV runtime and camera detector initialized.');
     return true;
   } catch (err) {
     console.error('[ArUco] setupArucoDetector error:', err);
     const statusBadge = document.getElementById('aruco-status-badge');
     if (statusBadge) {
       statusBadge.className = 'aruco-status-badge loading';
-      statusBadge.innerHTML = `<span class="aruco-status-dot"></span> OpenCV Init Error`;
+      statusBadge.innerHTML = '<span class="aruco-status-dot"></span> OpenCV Init Error';
       statusBadge.title = err.message || String(err);
     }
     return false;
@@ -366,19 +350,18 @@ function onCvLoaded() {
 // Expose globally
 window.onCvLoaded = onCvLoaded;
 window.setupArucoDetector = setupArucoDetector;
-window.Aruco4x4Detector = Aruco4x4Detector;
+window.ArucoCameraDetector = ArucoCameraDetector;
 
-// Auto-check on DOMContentLoaded
 document.addEventListener('DOMContentLoaded', () => {
   setupArucoDetector();
 });
 
-// Periodic failsafe check (handles fast cache / async WebAssembly load on iOS Safari)
-(function() {
+// Failsafe polling: covers OpenCV finishing its async WebAssembly start at any point (e.g. iOS Safari)
+(function () {
   let attempts = 0;
   const interval = setInterval(() => {
     attempts++;
-    if (setupArucoDetector() || attempts > 60) {
+    if (setupArucoDetector() || attempts > 240) {
       clearInterval(interval);
     }
   }, 250);

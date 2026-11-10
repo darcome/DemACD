@@ -2785,35 +2785,101 @@
       this.historyManager.push(this.canvasEngine.getSnapshot());
     }
 
-    onArMarkersDetected(detectedMarkers, imgWidth, imgHeight) {
-      if (!this.arucoBabylonEngine || !this.showAr3DCourse) return;
+    /**
+     * Called by the ArUco detector for every analyzed camera frame: locates the camera on the field from
+     * the detected markers and renders the 3D course for that frame.
+     */
+    onArFrame(frame) {
+      const tracker = window.arucoFieldTracker;
+      if (!this.arucoBabylonEngine || !tracker) return;
 
-      const idToKeyMap = window.arucoTracker ? window.arucoTracker.getIdToKeyMap() : {};
-      const res = this.arucoBabylonEngine.alignWithMarkers(
-        detectedMarkers,
-        this.field,
-        imgWidth || 1280,
-        imgHeight || 720,
-        idToKeyMap
-      );
-
-      const statusTextEl = document.getElementById('aruco-ar-status-text');
-      if (statusTextEl && res) {
-        if (res.status === 'locked') {
-          statusTextEl.innerHTML = `<i class="fa-solid fa-anchor" style="color: #f87171;"></i> 3D: Anchor Locked`;
-        } else if (res.status === 'multi') {
-          statusTextEl.innerHTML = `<i class="fa-solid fa-cube" style="color: #34d399;"></i> 3D: ${res.markerCount} Markers Aligned`;
-        } else if (res.status === 'single') {
-          const mKey = res.primaryKey || 'Single';
-          const def = window.arucoTracker?.markerDefinitions.find(d => d.key === mKey);
-          const name = def ? def.name : mKey;
-          statusTextEl.innerHTML = `<i class="fa-solid fa-cube" style="color: #38bdf8;"></i> 3D: Aligned (${name})`;
-        } else if (res.status === 'holding') {
-          statusTextEl.innerHTML = `<i class="fa-solid fa-clock" style="color: #fbbf24;"></i> 3D: Holding Anchor...`;
-        } else {
-          statusTextEl.innerHTML = `<i class="fa-solid fa-magnifying-glass" style="color: #94a3b8;"></i> 3D: Searching Marker...`;
-        }
+      const idToKey = window.arucoTracker ? window.arucoTracker.getIdToKeyMap() : {};
+      const markers = [];
+      for (const m of frame.markers) {
+        const key = idToKey[m.id];
+        if (key) markers.push({ key, corners: m.corners });
       }
+
+      const res = tracker.update({
+        markers,
+        width: frame.width,
+        height: frame.height,
+        field: this.field,
+        time: frame.time,
+        deviceRotation: window.arucoDeviceRotation ? window.arucoDeviceRotation.current() : null
+      });
+      this.lastArResult = res;
+
+      this.arucoBabylonEngine.renderAr(
+        res.camera,
+        frame.width,
+        frame.height,
+        tracker.verticalFov(frame.width, frame.height)
+      );
+      this._setArStatus(res);
+    }
+
+    /** Camera stopped: clear the overlay and forget the pose (what was learned about the markers stays). */
+    onArStopped() {
+      if (window.arucoFieldTracker) {
+        window.arucoFieldTracker.setLocked(false);
+        window.arucoFieldTracker._dropTracking();
+      }
+      this._syncArLockButton();
+      if (this.arucoBabylonEngine) this.arucoBabylonEngine.renderAr(null);
+      this._arStatusKey = null;
+      const el = document.getElementById('aruco-ar-status-text');
+      if (el) el.innerHTML = '<i class="fa-solid fa-magnifying-glass" style="color: #94a3b8;"></i> 3D: Searching Marker...';
+    }
+
+    _setArStatus(res) {
+      const el = document.getElementById('aruco-ar-status-text');
+      if (!el) return;
+
+      let key, html;
+      if (res.status === 'locked') {
+        key = 'locked';
+        html = '<i class="fa-solid fa-anchor" style="color: #f87171;"></i> 3D: Anchor Locked';
+      } else if (res.status === 'tracking') {
+        const poorFit = res.rmsPx > 4;
+        const single = res.keys.length === 1;
+        key = `tracking:${res.keys.join('+')}:${poorFit}`;
+        if (poorFit) {
+          html = `<i class="fa-solid fa-triangle-exclamation" style="color: #fbbf24;"></i> 3D: Poor fit (${res.keys.length} markers) - check marker IDs / field size`;
+        } else if (single) {
+          const def = window.arucoTracker?.markerDefinitions.find(d => d.key === res.keys[0]);
+          html = `<i class="fa-solid fa-cube" style="color: #38bdf8;"></i> 3D: Aligned (${def ? def.name : res.keys[0]})`;
+        } else {
+          html = `<i class="fa-solid fa-cube" style="color: #34d399;"></i> 3D: ${res.keys.length} Markers Aligned`;
+        }
+      } else if (res.status === 'holding') {
+        key = `holding:${res.gyro}`;
+        html = res.gyro
+          ? '<i class="fa-solid fa-compass" style="color: #fbbf24;"></i> 3D: Holding (motion sensor)...'
+          : '<i class="fa-solid fa-clock" style="color: #fbbf24;"></i> 3D: Holding Anchor...';
+      } else {
+        key = 'lost';
+        html = '<i class="fa-solid fa-magnifying-glass" style="color: #94a3b8;"></i> 3D: Searching Marker...';
+      }
+
+      // Only touch the DOM when the message changes
+      if (key !== this._arStatusKey) {
+        this._arStatusKey = key;
+        el.innerHTML = html;
+      }
+    }
+
+    _syncArLockButton() {
+      const btn = document.getElementById('btn-ar-lock-anchor');
+      if (!btn) return;
+      const isLocked = !!(window.arucoFieldTracker && window.arucoFieldTracker.isLocked);
+      btn.classList.toggle('locked', isLocked);
+      btn.innerHTML = isLocked
+        ? '<i class="fa-solid fa-lock"></i> Anchor Locked'
+        : '<i class="fa-solid fa-anchor"></i> Lock Anchor';
+      btn.title = isLocked
+        ? 'Anchor locked: the course stays where it is and marker detections are ignored'
+        : 'Lock the 3D course where it is now, ignoring the markers from then on';
     }
 
     _bindHeaderActions() {
@@ -2954,24 +3020,11 @@
       });
 
       const btnLockAnchor = document.getElementById('btn-ar-lock-anchor');
-      btnLockAnchor?.addEventListener('click', async () => {
-        if (!window.arucoPoseEstimator) return;
-        if (!window.arucoPoseEstimator.hasGyro) {
-          await window.arucoPoseEstimator.requestGyroPermission();
-        }
-        const isLocked = window.arucoPoseEstimator.toggleAnchorLock();
-        btnLockAnchor.classList.toggle('locked', isLocked);
-        btnLockAnchor.innerHTML = isLocked
-          ? '<i class="fa-solid fa-lock"></i> Anchor Locked'
-          : '<i class="fa-solid fa-anchor"></i> Lock Anchor';
-        btnLockAnchor.title = isLocked
-          ? 'Anchor locked! You can now walk around the field without losing 3D alignment'
-          : 'Lock 3D Course Anchor to walk around the field without marker in view';
-
-        const statusTextEl = document.getElementById('aruco-ar-status-text');
-        if (statusTextEl && isLocked) {
-          statusTextEl.innerHTML = '<i class="fa-solid fa-anchor" style="color: #f87171;"></i> 3D: Anchor Locked';
-        }
+      btnLockAnchor?.addEventListener('click', () => {
+        if (!window.arucoFieldTracker) return;
+        // Locking only makes sense once the course is placed (toggleLock refuses otherwise)
+        window.arucoFieldTracker.toggleLock();
+        this._syncArLockButton();
       });
 
       const arGroundSlider = document.getElementById('slider-ar-ground-opacity');

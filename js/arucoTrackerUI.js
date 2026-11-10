@@ -78,6 +78,11 @@ class ArUcoTrackerUI {
     document.getElementById('btn-aruco-reset')?.addEventListener('click', () => {
       this.resetStates();
       this.updateUI();
+      // Also forget the 3D alignment and what was learned about the markers
+      if (window.arucoFieldTracker) window.arucoFieldTracker.reset();
+      if (window.agilityApp && typeof window.agilityApp._syncArLockButton === 'function') {
+        window.agilityApp._syncArLockButton();
+      }
     });
 
     document.getElementById('btn-aruco-export')?.addEventListener('click', () => {
@@ -553,8 +558,8 @@ class ArUcoTrackerUI {
       sizeInput.value = this.markerSizeMeters || 0.25;
     }
     const fovInput = document.getElementById('input-aruco-fov');
-    if (fovInput && window.arucoPoseEstimator) {
-      fovInput.value = window.arucoPoseEstimator.fovDegrees;
+    if (fovInput && window.arucoFieldTracker) {
+      fovInput.value = window.arucoFieldTracker.fovDegrees;
     }
 
     const list = document.getElementById('aruco-settings-inputs');
@@ -598,16 +603,16 @@ class ArUcoTrackerUI {
           const sizeVal = parseFloat(sizeInput.value);
           if (sizeVal > 0) {
             this.markerSizeMeters = sizeVal;
-            if (window.arucoPoseEstimator) {
-              window.arucoPoseEstimator.setMarkerSize(sizeVal);
+            if (window.arucoFieldTracker) {
+              window.arucoFieldTracker.setMarkerSize(sizeVal);
             }
           }
         }
 
         // Save camera field of view
         const fovInput = document.getElementById('input-aruco-fov');
-        if (fovInput && window.arucoPoseEstimator) {
-          window.arucoPoseEstimator.setFov(fovInput.value);
+        if (fovInput && window.arucoFieldTracker) {
+          window.arucoFieldTracker.setFov(fovInput.value);
         }
 
         // Save marker IDs
