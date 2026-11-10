@@ -74,12 +74,16 @@ class BabylonEngine {
         this.scene = new BABYLON.Scene(this.engine);
         this.scene.clearColor = new BABYLON.Color4(0.0, 0.0, 0.0, 0.0); // Fully transparent
 
-        // Fixed AR Camera at origin (0,0,0) looking down +Z
+        // AR camera: the course stays at the world origin and this camera is moved to where the real
+        // camera is on the field (see renderAr)
         this.camera = new BABYLON.TargetCamera("arCamera", new BABYLON.Vector3(0, 0, 0), this.scene);
-        this.camera.setTarget(new BABYLON.Vector3(0, 0, 1));
+        this.camera.rotationQuaternion = BABYLON.Quaternion.Identity();
         this.camera.fovMode = BABYLON.Camera.FOVMODE_VERTICAL_FIXED;
         this.camera.minZ = 0.05;
-        this.camera.maxZ = 300;
+        this.camera.maxZ = 1000;
+        this._arSize = null;
+        this._arCourseVisible = true;
+        this._arMatrix = new BABYLON.Matrix();
 
         // Hemispheric Ambient Light
         const hemiLight = new BABYLON.HemisphericLight("arHemiLight", new BABYLON.Vector3(0, 1, 0), this.scene);
@@ -138,10 +142,13 @@ class BabylonEngine {
         this.courseRoot.setEnabled(false); // Initially hidden until marker aligned
       }
 
-      // Start Render Loop
-      this.engine.runRenderLoop(() => {
-        if (this.scene) this.scene.render();
-      });
+      // Render loop. The AR view has none: it is rendered once per analyzed camera frame (renderAr),
+      // so the overlay always belongs to the video frame it is drawn on.
+      if (this.mode !== 'ar') {
+        this.engine.runRenderLoop(() => {
+          if (this.scene) this.scene.render();
+        });
+      }
 
       window.addEventListener('resize', () => {
         this.resize();
@@ -156,13 +163,9 @@ class BabylonEngine {
   resize() {
     if (this.engine) {
       if (this.mode === 'ar') {
-        const outCanvas = document.getElementById('outputCanvas');
-        if (outCanvas && outCanvas.width > 0 && outCanvas.height > 0) {
-          this.canvas.width = outCanvas.width;
-          this.canvas.height = outCanvas.height;
-          this.engine.setSize(outCanvas.width, outCanvas.height, true);
-        } else {
-          this.engine.resize();
+        // The AR buffer always has the size of the video frame; CSS scales it together with the video
+        if (this._arSize) {
+          this.engine.setSize(this._arSize.width, this._arSize.height, true);
         }
       } else {
         this.engine.resize();
@@ -210,68 +213,52 @@ class BabylonEngine {
     if (this.scene) this.scene.render();
   }
 
-  // --- AR POSE & ALIGNMENT METHODS ---
-  setCoursePose(pose) {
-    if (!this.courseRoot || !pose) return;
-    this.courseRoot.position.set(pose.position.x, pose.position.y, pose.position.z);
-    if (pose.rotationQuaternion) {
-      if (!this.courseRoot.rotationQuaternion) {
-        this.courseRoot.rotationQuaternion = new BABYLON.Quaternion();
-      }
-      this.courseRoot.rotationQuaternion.set(
-        pose.rotationQuaternion.x,
-        pose.rotationQuaternion.y,
-        pose.rotationQuaternion.z,
-        pose.rotationQuaternion.w
-      );
-    }
-    this.courseRoot.setEnabled(true);
-  }
-
+  // --- AR RENDERING ---
+  /** User toggle for the 3D course overlay. */
   setCourseVisible(visible) {
-    if (this.courseRoot) {
-      this.courseRoot.setEnabled(!!visible);
+    this._arCourseVisible = !!visible;
+    if (this.courseRoot && !visible) {
+      this.courseRoot.setEnabled(false);
+      if (this.scene && this.mode === 'ar') this.scene.render();
     }
   }
 
-  updateCameraFov(width, height) {
-    if (!this.camera || this.mode !== 'ar' || !width || !height || !window.arucoPoseEstimator) return;
-    // Must use exactly the intrinsics the pose solver used, or the overlay drifts away from the markers
-    this.camera.fov = window.arucoPoseEstimator.getVerticalFov(width, height);
-  }
+  /**
+   * Renders the course as seen by the real camera, for one video frame.
+   * @param {{position:number[], axes:number[]}|null} cam - camera on the field (from
+   *        ArUcoFieldTracker.toFieldCamera): position plus its right / up / forward axes as rows.
+   *        null hides the course.
+   * @param {number} width, height - size of the video frame in pixels
+   * @param {number} verticalFov - radians; must match the intrinsics the tracker solved with
+   */
+  renderAr(cam, width, height, verticalFov) {
+    if (this.mode !== 'ar' || !this.engine || !this.scene || !this.camera) return;
 
-  alignWithMarkers(detectedMarkers, field, videoWidth, videoHeight, idToKeyMap) {
-    if (!window.arucoPoseEstimator || this.mode !== 'ar') return null;
-
-    if (this.canvas && videoWidth > 0 && videoHeight > 0) {
-      if (this.engine && (this.engine.getRenderWidth() !== videoWidth || this.engine.getRenderHeight() !== videoHeight)) {
-        this.canvas.width = videoWidth;
-        this.canvas.height = videoHeight;
-        this.engine.setSize(videoWidth, videoHeight, true);
-      }
+    if (width > 0 && height > 0 && (!this._arSize || this._arSize.width !== width || this._arSize.height !== height)) {
+      this._arSize = { width, height };
+      this.engine.setSize(width, height, true);
     }
 
-    this.updateCameraFov(videoWidth, videoHeight);
+    const show = !!cam && this._arCourseVisible;
+    if (this.courseRoot) this.courseRoot.setEnabled(show);
 
-    const result = window.arucoPoseEstimator.estimatePose(
-      detectedMarkers,
-      idToKeyMap,
-      field || this.currentField,
-      videoWidth,
-      videoHeight
-    );
-
-    if (result && result.pose) {
-      this.setCoursePose(result.pose);
-    } else if (result && result.status === 'lost') {
-      this.setCourseVisible(false);
+    if (show) {
+      const a = cam.axes, p = cam.position;
+      // World matrix of the camera (Babylon row-vector layout); Babylon derives the quaternion itself,
+      // so its own rotation conventions apply
+      BABYLON.Matrix.FromValuesToRef(
+        a[0], a[1], a[2], 0,
+        a[3], a[4], a[5], 0,
+        a[6], a[7], a[8], 0,
+        0, 0, 0, 1,
+        this._arMatrix
+      );
+      BABYLON.Quaternion.FromRotationMatrixToRef(this._arMatrix, this.camera.rotationQuaternion);
+      this.camera.position.set(p[0], p[1], p[2]);
+      if (verticalFov > 0) this.camera.fov = verticalFov;
     }
 
-    if (this.scene) {
-      this.scene.render();
-    }
-
-    return result;
+    this.scene.render();
   }
 
   /**
