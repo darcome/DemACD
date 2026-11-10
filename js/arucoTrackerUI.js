@@ -561,6 +561,19 @@ class ArUcoTrackerUI {
     if (fovInput && window.arucoFieldTracker) {
       fovInput.value = window.arucoFieldTracker.fovDegrees;
     }
+    // Marker placement (flat / upright) and, for upright markers, the height of their center
+    const placementInput = document.getElementById('input-aruco-placement');
+    const heightInput = document.getElementById('input-aruco-marker-height');
+    const heightRow = document.getElementById('row-aruco-marker-height');
+    if (placementInput && window.arucoFieldTracker) {
+      placementInput.value = window.arucoFieldTracker.markerPlacement;
+      if (heightInput) heightInput.value = window.arucoFieldTracker.markerHeightMeters;
+      const syncHeightRow = () => {
+        if (heightRow) heightRow.style.display = placementInput.value === 'upright' ? 'flex' : 'none';
+      };
+      placementInput.onchange = syncHeightRow;
+      syncHeightRow();
+    }
 
     const list = document.getElementById('aruco-settings-inputs');
     if (list) {
@@ -606,6 +619,17 @@ class ArUcoTrackerUI {
             if (window.arucoFieldTracker) {
               window.arucoFieldTracker.setMarkerSize(sizeVal);
             }
+          }
+        }
+
+        // Save marker placement and (upright) marker center height
+        const placementInput = document.getElementById('input-aruco-placement');
+        const heightInput = document.getElementById('input-aruco-marker-height');
+        if (placementInput && window.arucoFieldTracker) {
+          window.arucoFieldTracker.setMarkerPlacement(placementInput.value);
+          if (heightInput) window.arucoFieldTracker.setMarkerHeight(heightInput.value);
+          if (window.agilityApp && typeof window.agilityApp._syncArLockButton === 'function') {
+            window.agilityApp._syncArLockButton();
           }
         }
 
