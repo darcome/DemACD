@@ -2844,7 +2844,15 @@
         const poorFit = res.rmsPx > 4;
         const single = res.keys.length === 1;
         key = `tracking:${res.keys.join('+')}:${poorFit}`;
-        if (poorFit) {
+        // The rectangle the markers really form, measured from the image, against the field's proportions
+        const fieldAspect = this.field.widthMeters / this.field.lengthMeters;
+        const shapeOff = res.measuredAspect && Math.abs(Math.log(res.measuredAspect / fieldAspect)) > 0.08;
+        if (poorFit && shapeOff) {
+          const w = this.field.widthMeters;
+          const fitLength = Math.round(w / res.measuredAspect * 10) / 10;
+          key += `:shape:${fitLength}`;
+          html = `<i class="fa-solid fa-triangle-exclamation" style="color: #fbbf24;"></i> 3D: Field shape does not match the markers - they form ${w} x ${fitLength} m proportions, the field is ${w} x ${this.field.lengthMeters} m`;
+        } else if (poorFit) {
           html = `<i class="fa-solid fa-triangle-exclamation" style="color: #fbbf24;"></i> 3D: Poor fit (${res.keys.length} markers) - check marker IDs / field size`;
         } else if (single) {
           const def = window.arucoTracker?.markerDefinitions.find(d => d.key === res.keys[0]);

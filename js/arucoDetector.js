@@ -235,14 +235,25 @@ class ArucoCameraDetector {
       ctx.lineWidth = lw;
       ctx.strokeStyle = '#22e36b';
       ctx.stroke();
-      // First corner (the marker's own top-left)
+      // Marker center = where its diagonals cross. This is the point that is matched to the field.
+      const d1x = c[2].x - c[0].x, d1y = c[2].y - c[0].y, d2x = c[3].x - c[1].x, d2y = c[3].y - c[1].y;
+      const den = d1x * d2y - d1y * d2x;
+      const t = Math.abs(den) > 1e-9 ? ((c[1].x - c[0].x) * d2y - (c[1].y - c[0].y) * d2x) / den : 0.5;
+      const mx = c[0].x + t * d1x, my = c[0].y + t * d1y;
+      ctx.beginPath();
+      ctx.arc(mx, my, lw * 2, 0, 2 * Math.PI);
       ctx.fillStyle = '#ff3b6b';
-      ctx.fillRect(c[0].x - lw * 1.5, c[0].y - lw * 1.5, lw * 3, lw * 3);
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = '#ffffff';
+      ctx.stroke();
+      // ID next to the marker, so it does not cover the center
+      const ty = Math.min(c[0].y, c[1].y, c[2].y, c[3].y) - lw * 5;
       ctx.lineWidth = 3;
       ctx.strokeStyle = 'rgba(0, 0, 0, 0.75)';
-      ctx.strokeText(String(m.id), m.center.x, m.center.y);
+      ctx.strokeText(String(m.id), mx, ty);
       ctx.fillStyle = '#ffffff';
-      ctx.fillText(String(m.id), m.center.x, m.center.y);
+      ctx.fillText(String(m.id), mx, ty);
     }
     ctx.restore();
   }
