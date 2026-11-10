@@ -2,10 +2,11 @@
  * Export & Save Modal Component for Agility Course Designer
  */
 export class ExportModal {
-  constructor(modalEl, canvasEngine, pathModel) {
+  constructor(modalEl, canvasEngine, pathModel, babylonEngine = null) {
     this.modal = modalEl;
     this.canvasEngine = canvasEngine;
     this.pathModel = pathModel;
+    this.babylonEngine = babylonEngine;
   }
 
   show() {
@@ -62,6 +63,12 @@ export class ExportModal {
               <div class="export-desc">Save editable layout JSON file to load and modify later.</div>
             </div>
 
+            <div class="export-card" id="btn-export-glb">
+              <div class="export-icon" style="color: var(--accent-blue);"><i class="fa-solid fa-cube"></i></div>
+              <div class="export-title">Export 3D Model (.glb)</div>
+              <div class="export-desc">Download 3D scene with obstacles, terrain, and trajectory path.</div>
+            </div>
+
             <div class="export-card" id="btn-import-json">
               <div class="export-icon"><i class="fa-solid fa-folder-open"></i></div>
               <div class="export-title">Load Course File (.json)</div>
@@ -100,6 +107,35 @@ export class ExportModal {
     // Save JSON
     this.modal.querySelector('#btn-export-json').addEventListener('click', () => {
       this._saveJSON();
+    });
+
+    // Export GLB
+    const glbCard = this.modal.querySelector('#btn-export-glb');
+    glbCard?.addEventListener('click', async () => {
+      const engine = this.babylonEngine || (window.agilityApp ? window.agilityApp.babylonEngine : null);
+      if (!engine) {
+        alert('3D Babylon Engine is not available.');
+        return;
+      }
+      const titleEl = glbCard.querySelector('.export-title');
+      const origTitle = titleEl ? titleEl.innerHTML : '';
+      try {
+        glbCard.style.pointerEvents = 'none';
+        if (titleEl) titleEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Exporting .GLB...';
+        engine.updateScene(this.canvasEngine.field, this.canvasEngine.obstacles, this.pathModel);
+        await engine.exportGLB(`Agility_Course_3D_${Date.now()}`);
+        if (titleEl) titleEl.innerHTML = '<i class="fa-solid fa-check" style="color: var(--accent-emerald);"></i> Exported .GLB!';
+        setTimeout(() => {
+          if (titleEl) titleEl.innerHTML = origTitle;
+          glbCard.style.pointerEvents = 'auto';
+          this.hide();
+        }, 1000);
+      } catch (err) {
+        console.error("GLB Export error:", err);
+        alert(`Failed to export GLB: ${err.message || err}`);
+        if (titleEl) titleEl.innerHTML = origTitle;
+        glbCard.style.pointerEvents = 'auto';
+      }
     });
 
     // Load JSON

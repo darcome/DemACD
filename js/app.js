@@ -2816,7 +2816,7 @@
         frame.height,
         tracker.verticalFov(frame.width, frame.height)
       );
-      this._setArStatus(res);
+      this._setArStatus(res, frame.width);
     }
 
     /** Camera stopped: clear the overlay and forget the pose (what was learned about the markers stays). */
@@ -2832,7 +2832,7 @@
       if (el) el.innerHTML = '<i class="fa-solid fa-magnifying-glass" style="color: #94a3b8;"></i> 3D: Searching Marker...';
     }
 
-    _setArStatus(res) {
+    _setArStatus(res, frameWidth) {
       const el = document.getElementById('aruco-ar-status-text');
       if (!el) return;
 
@@ -2841,9 +2841,15 @@
         key = 'locked';
         html = '<i class="fa-solid fa-anchor" style="color: #f87171;"></i> 3D: Anchor Locked';
       } else if (res.status === 'tracking') {
-        const poorFit = res.rmsPx > 4;
+        // Fit error, averaged over about a second so the message does not flicker
+        this._arFitPx = this._arFitPx == null ? res.rmsPx : this._arFitPx + 0.1 * (res.rmsPx - this._arFitPx);
+        // Limit of 8 px on a 1280 px wide image, with some hysteresis once the warning is showing
+        const limit = 8 * (frameWidth || 1280) / 1280;
+        const poorFit = this._arFitPx > (this._arPoorFit ? limit * 0.8 : limit);
+        this._arPoorFit = poorFit;
+        const fitPx = Math.round(this._arFitPx);
         const single = res.keys.length === 1;
-        key = `tracking:${res.keys.join('+')}:${poorFit}`;
+        key = `tracking:${res.keys.join('+')}:${poorFit}:${fitPx}`;
         // The rectangle the markers really form, measured from the image, against the field's proportions
         const fieldAspect = this.field.widthMeters / this.field.lengthMeters;
         const shapeOff = res.measuredAspect && Math.abs(Math.log(res.measuredAspect / fieldAspect)) > 0.08;
@@ -2853,14 +2859,15 @@
           key += `:shape:${fitLength}`;
           html = `<i class="fa-solid fa-triangle-exclamation" style="color: #fbbf24;"></i> 3D: Field shape does not match the markers - they form ${w} x ${fitLength} m proportions, the field is ${w} x ${this.field.lengthMeters} m`;
         } else if (poorFit) {
-          html = `<i class="fa-solid fa-triangle-exclamation" style="color: #fbbf24;"></i> 3D: Poor fit (${res.keys.length} markers) - check marker IDs / field size`;
+          html = `<i class="fa-solid fa-triangle-exclamation" style="color: #fbbf24;"></i> 3D: Poor fit (${res.keys.length} markers, ${fitPx} px) - check marker IDs / field size`;
         } else if (single) {
           const def = window.arucoTracker?.markerDefinitions.find(d => d.key === res.keys[0]);
-          html = `<i class="fa-solid fa-cube" style="color: #38bdf8;"></i> 3D: Aligned (${def ? def.name : res.keys[0]})`;
+          html = `<i class="fa-solid fa-cube" style="color: #38bdf8;"></i> 3D: Aligned (${def ? def.name : res.keys[0]}, ${fitPx} px)`;
         } else {
-          html = `<i class="fa-solid fa-cube" style="color: #34d399;"></i> 3D: ${res.keys.length} Markers Aligned`;
+          html = `<i class="fa-solid fa-cube" style="color: #34d399;"></i> 3D: ${res.keys.length} Markers Aligned (${fitPx} px)`;
         }
       } else if (res.status === 'holding') {
+        this._arFitPx = null;
         key = `holding:${res.gyro}`;
         html = res.gyro
           ? '<i class="fa-solid fa-compass" style="color: #fbbf24;"></i> 3D: Holding (motion sensor)...'
