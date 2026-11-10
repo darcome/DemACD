@@ -5,12 +5,15 @@
  * field, so the 3D course can be drawn on top of the video.
  *
  * What is trusted and what is not:
- *  - TRUSTED: where the CENTER of each marker sits on the field (the 8 perimeter points) and that the
- *    markers lie flat on the ground.
- *  - NOT TRUSTED: how each marker is turned on the ground, and the printed marker size. As soon as two or
- *    more markers are visible both are estimated from the image (and remembered), so a marker dropped on
- *    the grass a few degrees off - or a scaled-down test layout on a desk - still gives a consistent fit.
- *    Only when a single marker is visible do the remembered (or default) orientation and size get used.
+ *  - TRUSTED: where the CENTER of each marker sits on the field (the 8 perimeter points) and how the
+ *    markers are placed: either lying flat on the ground, or standing upright on a pedestal with their
+ *    center at a known height.
+ *  - NOT TRUSTED: the angle of each marker (how a flat marker is turned on the ground / which way an
+ *    upright marker faces) and the printed marker size. As soon as two or more markers are visible both
+ *    are estimated from the image (and remembered), so a marker placed a few degrees off - or a
+ *    scaled-down test layout on a desk - still gives a consistent fit. Only when a single marker is
+ *    visible do the remembered (or default) angle and size get used. Defaults: a flat marker has its top
+ *    toward north, an upright marker faces the center of the field.
  *
  * Per frame:
  *  1. IPPE on individual markers gives starting poses (a planar square always has two, the "tilt flip").
@@ -244,26 +247,54 @@
 
   /**
    * Pixel residuals of every corner for the state { R, t, yaws[], size }.
-   * obs[k] = { c: [X, Y] marker center on the ground, img: 4 normalized corners }
+   * obs[k] = { c: [X, Y, Z] marker center in the ground frame, img: 4 normalized corners }
+   * model = { upright, camWeight, camHeight }: marker placement and the optional camera height prior
    * Returns null when a corner falls behind the camera.
    */
-  function residuals(st, obs, f) {
+  function residuals(st, obs, f, model) {
     const R = st.R, t = st.t, half = st.size / 2;
-    const out = new Float64Array(obs.length * 8);
+    const upright = model.upright;
+    const out = new Float64Array(obs.length * 8 + (model.camWeight ? 2 : 0));
     for (let k = 0; k < obs.length; k++) {
       const o = obs[k];
       const cs = Math.cos(st.yaws[k]) * half, sn = Math.sin(st.yaws[k]) * half;
       for (let j = 0; j < 4; j++) {
         const sx = CORNER_SIGNS[j][0], sy = CORNER_SIGNS[j][1];
-        const X = o.c[0] + cs * sx - sn * sy;
-        const Y = o.c[1] + sn * sx + cs * sy;
-        const z = R[6] * X + R[7] * Y + t[2];
+        let X, Y, Z;
+        if (upright) {
+          // Standing marker facing the direction of its angle: its right edge is horizontal, its top is up
+          X = o.c[0] - sn * sx;
+          Y = o.c[1] + cs * sx;
+          Z = o.c[2] + half * sy;
+        } else {
+          // Marker lying on the ground, turned by its angle
+          X = o.c[0] + cs * sx - sn * sy;
+          Y = o.c[1] + sn * sx + cs * sy;
+          Z = o.c[2];
+        }
+        const z = R[6] * X + R[7] * Y + R[8] * Z + t[2];
         if (!(z > 1e-6)) return null;
-        out[k * 8 + j * 2] = f * ((R[0] * X + R[1] * Y + t[0]) / z - o.img[j][0]);
-        out[k * 8 + j * 2 + 1] = f * ((R[3] * X + R[4] * Y + t[1]) / z - o.img[j][1]);
+        out[k * 8 + j * 2] = f * ((R[0] * X + R[1] * Y + R[2] * Z + t[0]) / z - o.img[j][0]);
+        out[k * 8 + j * 2 + 1] = f * ((R[3] * X + R[4] * Y + R[5] * Z + t[1]) / z - o.img[j][1]);
       }
     }
+    if (model.camWeight) {
+      // Weak pull of the camera height toward the expected one; only matters where the image says little
+      out[obs.length * 8] = model.camWeight * (-(R[2] * t[0] + R[5] * t[1] + R[8] * t[2]) - model.camHeight);
+    }
     return out;
+  }
+
+  /**
+   * Rotation marker frame -> ground frame (columns: marker right, marker top, out of the printed face).
+   * Flat: the marker lies face-up, turned by `angle` (0 = top toward north).
+   * Upright: the marker stands with its top up and its face looking along `angle` (0 = east).
+   */
+  function markerToGround(upright, angle) {
+    const c = Math.cos(angle), s = Math.sin(angle);
+    return upright
+      ? [-s, 0, c, c, 0, s, 0, 1, 0]
+      : [c, -s, 0, s, c, 0, 0, 0, 1];
   }
 
   function robustCost(r) {
@@ -279,7 +310,7 @@
    * Refines a starting state. The camera pose is always optimized; with freeExtras the turn of every
    * marker on the ground and the common marker size are optimized too.
    */
-  function refine(start, obs, f, freeExtras, maxIter) {
+  function refine(start, obs, f, freeExtras, model, maxIter) {
     const n = obs.length;
     const nP = 6 + (freeExtras ? n + 1 : 0);
 
@@ -291,7 +322,7 @@
     });
 
     let st = { R: start.R, t: start.t, yaws: start.yaws, size: start.size };
-    let r = residuals(st, obs, f);
+    let r = residuals(st, obs, f, model);
     if (!r) return null;
     let cost = robustCost(r);
     let lambda = 1e-3;
@@ -305,7 +336,7 @@
       for (let p = 0; p < nP && ok; p++) {
         const d = new Array(nP).fill(0);
         d[p] = EPS;
-        const rp = residuals(apply(st, d), obs, f);
+        const rp = residuals(apply(st, d), obs, f, model);
         if (!rp) { ok = false; break; }
         const col = new Float64Array(m);
         for (let i = 0; i < m; i++) col[i] = (rp[i] - r[i]) / EPS;
@@ -341,7 +372,7 @@
         const delta = solveLinear(Ad, g);
         if (delta) {
           const cand = apply(st, delta);
-          const rc = residuals(cand, obs, f);
+          const rc = residuals(cand, obs, f, model);
           if (rc) {
             const cc = robustCost(rc);
             if (cc < cost) {
@@ -358,10 +389,11 @@
       if (!accepted || gain < 1e-7 * cost + 1e-10) break;
     }
 
+    // RMS corner error in pixels (the camera height prior is not a corner)
     let sum = 0;
-    for (let i = 0; i < m; i++) sum += r[i] * r[i];
+    for (let i = 0; i < n * 8; i++) sum += r[i] * r[i];
     st.cost = cost;
-    st.rms = Math.sqrt(sum / (m / 2));
+    st.rms = Math.sqrt(sum / (n * 4));
     return st;
   }
 
@@ -445,6 +477,12 @@
       this.gyroHoldMs = options.gyroHoldMs || 20000; // ... and this long when the sensor follows rotation
       this.minMarkerSidePx = 4;
 
+      // How the markers are placed: 'flat' on the ground, or 'upright' on a pedestal facing the field center
+      this.markerPlacement = options.markerPlacement === 'upright' ? 'upright' : 'flat';
+      this.markerHeightMeters = options.markerHeightMeters || 1.0; // upright only: marker CENTER above ground
+      this.cameraHeightMeters = 1.5;   // upright only: expected camera height (soft)
+      this.cameraHeightWeight = options.cameraHeightWeight === undefined ? 1.5 : options.cameraHeightWeight; // px per meter off
+
       // Smoothing: cutoff frequency (Hz) at rest, plus how much it opens up with motion
       this.rotMinCutoff = 1.0; this.rotBeta = 0.05;  // per deg/s
       this.posMinCutoff = 2.0; this.posBeta = 0.03;  // per px/s
@@ -476,6 +514,28 @@
         this.map.size = null;
         this.map.sizeCount = 0;
       }
+    }
+
+    /** 'flat' (on the ground) or 'upright' (on a pedestal, facing the field center). */
+    setMarkerPlacement(placement) {
+      const p = placement === 'upright' ? 'upright' : 'flat';
+      if (p !== this.markerPlacement) {
+        this.markerPlacement = p;
+        this.reset(); // what was learned about the markers belongs to the other placement
+      }
+    }
+
+    /** Upright markers only: height of the marker center above the ground. */
+    setMarkerHeight(meters) {
+      const v = parseFloat(meters);
+      if (v >= 0 && v !== this.markerHeightMeters) {
+        this.markerHeightMeters = v;
+        this._dropTracking();
+      }
+    }
+
+    get _upright() {
+      return this.markerPlacement === 'upright';
     }
 
     setFov(degrees) {
@@ -552,7 +612,7 @@
 
           let ax = 0, ay = 0;
           for (const o of obs) { ax += o.c[0]; ay += o.c[1]; }
-          this._smooth(solved, [ax / obs.length, ay / obs.length, 0], K.f, time);
+          this._smooth(solved, [ax / obs.length, ay / obs.length, obs[0].c[2]], K.f, time);
 
           this.raw = { R: solved.R, t: solved.t };
           this._lastSolveTime = time;
@@ -586,6 +646,7 @@
 
     _buildObservations(frame, K) {
       const layout = markerLayout(frame.field);
+      const upright = this._upright;
       const byKey = new Map();
       for (const m of frame.markers || []) {
         if (!m || !layout[m.key] || !m.corners || m.corners.length !== 4) continue;
@@ -597,12 +658,15 @@
         if (!(side >= this.minMarkerSidePx)) continue;
         const prev = byKey.get(m.key);
         if (prev && prev.side >= side) continue; // same ID twice: keep the bigger one
+        const g = layout[m.key];
+        const learned = this.map.yaw[m.key];
         byKey.set(m.key, {
           key: m.key,
-          c: layout[m.key],
+          c: [g[0], g[1], upright ? this.markerHeightMeters : 0],
           side,
           img: m.corners.map(p => [(p.x - K.cx) / K.f, (p.y - K.cy) / K.f]),
-          yaw: this.map.yaw[m.key] || 0
+          // Until measured: a flat marker has its top toward north, an upright one faces the field center
+          yaw: learned !== undefined ? learned : (upright ? Math.atan2(-g[1], -g[0]) : 0)
         });
       }
       return Array.from(byKey.values()).sort((a, b) => b.side - a.side);
@@ -620,14 +684,20 @@
       const seeds = [];
       if (ref) seeds.push({ R: ref.R, t: ref.t, yaws: obs.map(o => o.yaw), size: size0 });
 
+      const upright = this._upright;
+      // Upright markers seen head-on say little about the camera's pitch, i.e. its height above the
+      // ground. A person holds the camera at about eye level: lean on that where the image is vague.
+      const model = upright
+        ? { upright: true, camHeight: this.cameraHeightMeters, camWeight: this.cameraHeightWeight }
+        : { upright: false, camWeight: 0 };
       {
-        // From the biggest marker alone: its remembered (or default) turn on the ground fixes the heading
-        // of the field. With one marker this is all there is; with more it is just one more start.
+        // From the biggest marker alone: its remembered (or default) orientation fixes the heading of the
+        // field. With one marker this is all there is; with more it is just one more start.
         const o = obs[0];
-        const Rz = expSO3([0, 0, -o.yaw]);
+        const Mt = transpose(markerToGround(upright, o.yaw));
         for (const sol of o.ippe) {
-          const R = mul(sol.R, Rz);
-          const Rc = mulVec(R, [o.c[0], o.c[1], 0]);
+          const R = mul(sol.R, Mt);
+          const Rc = mulVec(R, o.c);
           seeds.push({
             R, t: [sol.t[0] - Rc[0], sol.t[1] - Rc[1], sol.t[2] - Rc[2]],
             yaws: obs.map(ob => ob.yaw), size: size0
@@ -652,7 +722,7 @@
       const cands = [];
       for (const seed of seeds) {
         if (!seed) continue;
-        const fit = refine(seed, obs, f, multi);
+        const fit = refine(seed, obs, f, multi, model);
         if (!fit) continue;
         // The camera has to be above the ground
         if (!(-(fit.R[2] * fit.t[0] + fit.R[5] * fit.t[1] + fit.R[8] * fit.t[2]) > 0)) continue;
@@ -678,9 +748,13 @@
       return chosen;
     }
 
-    /** Starting pose from marker a's plane and the direction from marker a to marker b. */
+    /** Starting pose from the "up" direction marker a shows and the direction from marker a to marker b. */
     _pairSeed(a, sa, b, tb, obs, size0) {
-      const n = [sa.R[2], sa.R[5], sa.R[8]];
+      // Which marker axis points up: the face normal for a flat marker, the top edge for an upright one.
+      // The other one (right edge / face normal) is horizontal and gives the marker's angle.
+      const upright = this._upright;
+      const u = upright ? 1 : 2, hz = upright ? 2 : 0;
+      const n = [sa.R[u], sa.R[3 + u], sa.R[6 + u]];
       const d = [tb[0] - sa.t[0], tb[1] - sa.t[1], tb[2] - sa.t[2]];
       const dn = dot(d, n);
       const dp = [d[0] - dn * n[0], d[1] - dn * n[1], d[2] - dn * n[2]];
@@ -700,18 +774,18 @@
       ]);
       // If the real marker size differs from the assumed one all distances are off by the same factor
       const rho = ml / len;
-      const Rc = mulVec(R, [a.c[0], a.c[1], 0]);
+      const Rc = mulVec(R, a.c);
       const t = [rho * sa.t[0] - Rc[0], rho * sa.t[1] - Rc[1], rho * sa.t[2] - Rc[2]];
 
-      // Turn of each marker on the ground, read off its own pose
+      // Angle of each marker, read off its own pose
       const yaws = obs.map(o => {
         let pick = null, align = -Infinity;
         for (const s of o.ippe) {
-          const al = s.R[2] * n[0] + s.R[5] * n[1] + s.R[8] * n[2];
+          const al = s.R[u] * n[0] + s.R[3 + u] * n[1] + s.R[6 + u] * n[2];
           if (al > align) { align = al; pick = s; }
         }
         if (!pick) return o.yaw;
-        const v = tMulVec(R, [pick.R[0], pick.R[3], pick.R[6]]);
+        const v = tMulVec(R, [pick.R[hz], pick.R[3 + hz], pick.R[6 + hz]]);
         return Math.atan2(v[1], v[0]);
       });
       return { R, t, yaws, size: size0 * rho };
