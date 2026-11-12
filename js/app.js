@@ -226,6 +226,15 @@
     return Math.hypot(dx, dy);
   }
 
+  function pointToSegmentDistance(p, a, b) {
+    const abx = b.x - a.x;
+    const aby = b.y - a.y;
+    const lenSq = abx * abx + aby * aby;
+    if (lenSq < 1e-9) return Math.hypot(p.x - a.x, p.y - a.y);
+    const t = Math.max(0, Math.min(1, ((p.x - a.x) * abx + (p.y - a.y) * aby) / lenSq));
+    return Math.hypot(p.x - (a.x + t * abx), p.y - (a.y + t * aby));
+  }
+
   function rotatePoint(p, center, angleDeg) {
     const rad = degToRad(angleDeg);
     const cos = Math.cos(rad);
@@ -489,7 +498,7 @@
     getTunnelBoundingBox() {
       const isTunnelType = this.type === OBSTACLE_TYPES.TUNNEL || (typeof this.type === 'string' && this.type.startsWith('tunnel'));
       if (!isTunnelType) {
-        return { widthMeters: this.widthMeters, depthMeters: this.depthMeters };
+        return { widthMeters: this.widthMeters, depthMeters: this.depthMeters, centerOffsetX: 0, centerOffsetY: 0 };
       }
       const localSpline = this.getTunnelLocalSplinePoints(30);
       let minLX = Infinity, maxLX = -Infinity, minLY = Infinity, maxLY = -Infinity;
@@ -503,7 +512,9 @@
       const diameter = (this.def && this.def.widthMeters) ? this.def.widthMeters : 0.6;
       return {
         widthMeters: Math.max(diameter, (maxLX - minLX) + diameter),
-        depthMeters: Math.max(this.getLengthMeters(), (maxLY - minLY) + diameter)
+        depthMeters: Math.max(diameter, (maxLY - minLY) + diameter),
+        centerOffsetX: (minLX + maxLX) / 2,
+        centerOffsetY: (minLY + maxLY) / 2
       };
     }
 
@@ -797,12 +808,13 @@
         return [endA, endB];
       }
 
-      // 3. Jumps with Reverse Wrap (Backside Push)
-      if (this.wrap === WRAP_DIRECTIONS.REVERSE_LEFT || this.wrap === WRAP_DIRECTIONS.REVERSE_RIGHT) {
-        const isLeft = this.wrap === WRAP_DIRECTIONS.REVERSE_LEFT;
-        const wingDir = isLeft ? -1 : 1;
-        const wingWrapPt = localToWorld((halfW + 0.8) * wingDir, 0, this.x, this.y, this.rotation);
-        return [wingWrapPt, centerWorld];
+      // 3. Jumps with Wrap (Frontside or Reverse/Backside Push)
+      if (this.wrap === WRAP_DIRECTIONS.REVERSE_LEFT || this.wrap === WRAP_DIRECTIONS.REVERSE_RIGHT ||
+          this.wrap === WRAP_DIRECTIONS.LEFT || this.wrap === WRAP_DIRECTIONS.RIGHT) {
+        const isReverse = this.wrap === WRAP_DIRECTIONS.REVERSE_LEFT || this.wrap === WRAP_DIRECTIONS.REVERSE_RIGHT;
+        const isLeft = this.wrap === WRAP_DIRECTIONS.REVERSE_LEFT || this.wrap === WRAP_DIRECTIONS.LEFT;
+        const wingWrapPt = localToWorld((halfW + 0.8) * (isLeft ? -1 : 1), 0, this.x, this.y, this.rotation);
+        return isReverse ? [wingWrapPt, centerWorld] : [centerWorld, wingWrapPt];
       }
 
       // 4. Standard Jumps, Start/Finish
@@ -811,11 +823,16 @@
 
     containsPoint(px, py) {
       const isTunnelType = this.type === OBSTACLE_TYPES.TUNNEL || (typeof this.type === 'string' && this.type.startsWith('tunnel'));
-      if (isTunnelType && this.tunnelNodes) {
-        const worldNodes = this.getTunnelWorldNodes();
-        if (worldNodes.some(n => Math.hypot(n.x - px, n.y - py) < (this.widthMeters / 2 + 0.6))) {
-          return true;
+      if (isTunnelType) {
+        const localPt = worldToLocal(px, py, this.x, this.y, this.rotation);
+        const spline = this.getTunnelLocalSplinePoints(30);
+        const hitRadius = (this.widthMeters || 0.6) / 2 + 0.45;
+        for (let i = 0; i < spline.length - 1; i++) {
+          if (pointToSegmentDistance(localPt, spline[i], spline[i + 1]) <= hitRadius) {
+            return true;
+          }
         }
+        return false;
       }
       return isPointInOrientedRect(px, py, this.x, this.y, this.widthMeters + 0.3, this.depthMeters + 0.3, this.rotation);
     }
@@ -876,12 +893,18 @@
       obstacles.forEach(o => { o.seq = num++; });
       this.segmentControlNodes = {};
     }
-    getSegmentNodes(obs1, obs2, seq1 = null, seq2 = null) {
+    getSegmentNodes(obs1, obs2, seq1 = null, seq2 = null, startPtOverride = null, endPtOverride = null) {
       const key = (seq1 !== null && seq2 !== null) ? `${obs1.id}_s${seq1}_${obs2.id}_s${seq2}` : `${obs1.id}_${obs2.id}`;
-      const v1 = obs1.getWaypoints();
-      const v2 = obs2.getWaypoints();
-      const startPt = v1[v1.length - 1];
-      const endPt = v2[0];
+      let startPt = startPtOverride;
+      let endPt = endPtOverride;
+      if (!startPt || !endPt) {
+        const v1 = obs1.getWaypoints();
+        startPt = startPt || v1[v1.length - 1];
+        if (!endPt) {
+          const v2 = obs2.getWaypoints(startPt);
+          endPt = v2[0];
+        }
+      }
 
       if (!this.segmentControlNodes[key] || this.segmentControlNodes[key].length === 0) {
         this.segmentControlNodes[key] = [
@@ -898,37 +921,47 @@
       }
       return this.segmentControlNodes[key];
     }
-    getAllWaypoints(obstacles) {
+    getCourseData(obstacles) {
       const steps = this.getSequencedSteps(obstacles);
-      if (steps.length === 0) return [];
-
-      let allPoints = [];
-
-      for (let i = 0; i < steps.length; i++) {
-        const step = steps[i];
-        const obs = step.obstacle;
-        const prevPt = allPoints.length > 0 ? allPoints[allPoints.length - 1] : null;
-        const waypts = obs.getWaypoints(prevPt);
-        allPoints = allPoints.concat(waypts);
-
-        if (i < steps.length - 1) {
-          const nextStep = steps[i + 1];
-          const nextObs = nextStep.obstacle;
-          const segNodes = this.getSegmentNodes(obs, nextObs, step.seq, nextStep.seq);
-          allPoints = allPoints.concat(segNodes);
-        }
+      if (steps.length === 0) {
+        return { steps: [], allWaypoints: [], segmentControlNodes: [], segments: [] };
       }
 
-      return allPoints;
+      const allWaypoints = [];
+      const segmentControlNodes = [];
+      const segments = [];
+
+      let prevWaypts = steps[0].obstacle.getWaypoints(null);
+      allWaypoints.push(...prevWaypts);
+
+      for (let i = 0; i < steps.length - 1; i++) {
+        const obs1 = steps[i].obstacle;
+        const obs2 = steps[i + 1].obstacle;
+        const seq1 = steps[i].seq;
+        const seq2 = steps[i + 1].seq;
+        const key = `${obs1.id}_s${seq1}_${obs2.id}_s${seq2}`;
+        const startPt = prevWaypts[prevWaypts.length - 1];
+
+        const existing = this.segmentControlNodes[key];
+        const nextEntryRef = (existing && existing.length > 0) ? existing[existing.length - 1] : startPt;
+        const nextWaypts = obs2.getWaypoints(nextEntryRef);
+        const endPt = nextWaypts[0];
+
+        const segNodes = this.getSegmentNodes(obs1, obs2, seq1, seq2, startPt, endPt);
+        segmentControlNodes.push(...segNodes);
+        allWaypoints.push(...segNodes, ...nextWaypts);
+        segments.push({ obs1, obs2, seq1, seq2, startPt, endPt, segNodes });
+
+        prevWaypts = nextWaypts;
+      }
+
+      return { steps, allWaypoints, segmentControlNodes, segments };
+    }
+    getAllWaypoints(obstacles) {
+      return this.getCourseData(obstacles).allWaypoints;
     }
     getAllSegmentControlNodes(obstacles) {
-      const steps = this.getSequencedSteps(obstacles);
-      let allNodes = [];
-      for (let i = 0; i < steps.length - 1; i++) {
-        const segNodes = this.getSegmentNodes(steps[i].obstacle, steps[i + 1].obstacle, steps[i].seq, steps[i + 1].seq);
-        allNodes = allNodes.concat(segNodes);
-      }
-      return allNodes;
+      return this.getCourseData(obstacles).segmentControlNodes;
     }
     resetSegmentNodes() {
       this.segmentControlNodes = {};
@@ -975,7 +1008,7 @@
     static render(ctx, pathModel, obstacles, field, activeDrag = null) {
       if (!pathModel.showPath && !pathModel.showSequenceNumbers) return;
       const list = pathModel.getSequencedObstacles(obstacles);
-      const allWaypoints = pathModel.getAllWaypoints(obstacles);
+      const { allWaypoints, segmentControlNodes, segments } = pathModel.getCourseData(obstacles);
 
       if (allWaypoints.length === 0) return;
 
@@ -991,23 +1024,12 @@
         ctx.beginPath();
         this._drawCatmullRomSpline(ctx, allWaypoints, field);
         ctx.stroke();
-
-        // Render directional arrows along the path
-        // if (pathModel.showDirectionArrows && allWaypoints.length >= 2) {
-        //   ctx.setLineDash([]);
-        //   for (let i = 0; i < allWaypoints.length - 1; i += 2) {
-        //     const p1 = { x: field.toPixels(allWaypoints[i].x), y: field.toPixels(allWaypoints[i].y) };
-        //     const p2 = { x: field.toPixels(allWaypoints[i + 1].x), y: field.toPixels(allWaypoints[i + 1].y) };
-        //     this._renderPathArrow(ctx, p1, p2);
-        //   }
-        // }
         ctx.restore();
       }
 
-      // 2. Render 3 Movable Control Nodes on Every Trajectory Segment (if showControlNodes is enabled)
+      // 2. Render Movable Control Nodes on Every Trajectory Segment (if showControlNodes is enabled)
       if (pathModel.showControlNodes) {
-        const segNodes = pathModel.getAllSegmentControlNodes(obstacles);
-        segNodes.forEach(node => {
+        segmentControlNodes.forEach(node => {
           const px = field.toPixels(node.x);
           const py = field.toPixels(node.y);
 
@@ -1023,29 +1045,15 @@
           ctx.arc(px, py, 4, 0, Math.PI * 2);
           ctx.fill();
           ctx.stroke();
-
-        //   // Node index label inside (1, 2, 3)
-        //   ctx.shadowBlur = 0;
-        //   ctx.fillStyle = '#0f172a';
-        //   ctx.font = 'bold 9px sans-serif';
-        //   ctx.textAlign = 'center';
-        //   ctx.textBaseline = 'middle';
-        //   ctx.fillText((node.index + 1).toString(), px, py);
           ctx.restore();
         });
       }
 
       // 3. Render Inter-Obstacle Segment Distances (e.g. "9,20m")
-      const steps = pathModel.getSequencedSteps(obstacles);
-      if (pathModel.showPath && steps.length >= 2) {
-        for (let i = 0; i < steps.length - 1; i++) {
-          const obs1 = steps[i].obstacle;
-          const obs2 = steps[i + 1].obstacle;
-          const segNodes = pathModel.getSegmentNodes(obs1, obs2, steps[i].seq, steps[i + 1].seq);
-          const v1 = obs1.getWaypoints();
-          const v2 = obs2.getWaypoints();
-
-          const pts = [v1[v1.length - 1], ...segNodes, v2[0]];
+      if (pathModel.showPath && segments.length > 0) {
+        for (const seg of segments) {
+          const { startPt, endPt, segNodes } = seg;
+          const pts = [startPt, ...segNodes, endPt];
 
           let distMeters = 0;
           for (let j = 0; j < pts.length - 1; j++) {
@@ -1053,8 +1061,8 @@
           }
 
           const midNode = (segNodes && segNodes.length > 0) ? segNodes[Math.floor(segNodes.length / 2)] : {
-            x: (v1[v1.length - 1].x + v2[0].x) / 2,
-            y: (v1[v1.length - 1].y + v2[0].y) / 2
+            x: (startPt.x + endPt.x) / 2,
+            y: (startPt.y + endPt.y) / 2
           };
           if (!midNode) continue;
           const px = field.toPixels(midNode.x);
@@ -1271,20 +1279,24 @@
           break;
       }
 
+      this._renderWrapIndicator(ctx, obstacle, wPx, dPx);
       ctx.restore();
 
       if (obstacle.isSelected) {
         const isTunnel = obstacle.type === OBSTACLE_TYPES.TUNNEL || (typeof obstacle.type === 'string' && obstacle.type.startsWith('tunnel'));
         const bbox = (isTunnel && typeof obstacle.getTunnelBoundingBox === 'function')
           ? obstacle.getTunnelBoundingBox()
-          : { widthMeters: obstacle.widthMeters, depthMeters: obstacle.depthMeters };
+          : { widthMeters: obstacle.widthMeters, depthMeters: obstacle.depthMeters, centerOffsetX: 0, centerOffsetY: 0 };
 
         const selW = field.toPixels(bbox.widthMeters);
         const selD = field.toPixels(bbox.depthMeters);
+        const offX = field.toPixels(bbox.centerOffsetX || 0);
+        const offY = field.toPixels(bbox.centerOffsetY || 0);
 
         ctx.save();
         ctx.translate(px, py);
         ctx.rotate(degToRad(obstacle.rotation));
+        ctx.translate(offX, offY);
         ctx.strokeStyle = '#38bdf8';
         ctx.lineWidth = 3;
         ctx.shadowColor = 'rgba(56, 189, 248, 0.6)';
@@ -1293,7 +1305,7 @@
         ctx.strokeRect(-selW / 2 - 8, -selD / 2 - 8, selW + 16, selD + 16);
         ctx.restore();
 
-        this._renderSelectionHandles(ctx, px, py, selW, selD, obstacle.rotation);
+        this._renderSelectionHandles(ctx, px, py, selW, selD, obstacle.rotation, offX, offY);
       }
     }
 
@@ -1541,8 +1553,8 @@
 	  ctx.stroke(); 
 	  ctx.setLineDash([]);
       ctx.fillStyle = '#dc2626';
-      ctx.fillRect(-halfW - 6, -4, 6, 8); 
-	  ctx.fillRect(halfW - 6, -4, 6, 8);
+      ctx.fillRect(-halfW - 6, -4, 6, 8);
+      ctx.fillRect(halfW, -4, 6, 8);
     }
 
     static _renderGenericBox(ctx, obs, w, d) {
@@ -1571,10 +1583,11 @@
       ctx.restore();
     }
 
-    static _renderSelectionHandles(ctx, px, py, w, d, rotationDeg) {
+    static _renderSelectionHandles(ctx, px, py, w, d, rotationDeg, offX = 0, offY = 0) {
       ctx.save();
-      ctx.translate(px, py); 
-	  ctx.rotate(degToRad(rotationDeg));
+      ctx.translate(px, py);
+      ctx.rotate(degToRad(rotationDeg));
+      ctx.translate(offX, offY);
       const halfW = w / 2 + 10, halfD = d / 2 + 10;
       ctx.strokeStyle = '#38bdf8'; 
 	  ctx.lineWidth = 1.5; 
@@ -1615,22 +1628,28 @@
       this.selectedObstacles = [];
       this.panX = 40; this.panY = 60; this.zoom = 1.0;
       this.mode = 'select';
-      this.measureStart = null; this.measureEnd = null;
+      this.measureStart = null; this.measureEnd = null; this.isMeasuring = false;
       this.isDragging = false; this.dragStartPoint = { x: 0, y: 0 };
       this.isDraggingBadge = false;
       this.draggedBadgeObs = null;
       this.draggedBadgeSeq = null;
+      this.isPanning = false; this.panMoved = false; this.panStartedOnEmpty = false;
+      this.panMouseStart = { x: 0, y: 0 }; this.lastMouse = { x: 0, y: 0 };
+      this.isSpacePressed = false;
+      this.isTouchPinching = false; this.touchPinchDist = 0; this.touchPinchCenter = { x: 0, y: 0 };
 
       this._initEvents();
       this.resizeCanvas();
     }
     resizeCanvas() {
       const parent = this.canvas.parentElement;
+      if (!parent) return;
       const rect = parent.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
       const dpr = window.devicePixelRatio || 1;
       this.canvas.width = rect.width * dpr;
       this.canvas.height = rect.height * dpr;
-      this.ctx.scale(dpr, dpr);
+      this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       this.render();
     }
     setObstacles(list) { this.obstacles = list; this.render(); }
@@ -1672,7 +1691,20 @@
         const dup = Obstacle.fromJSON(obs.toJSON());
         dup.id = `obs_${Date.now()}_${Math.random()}`;
         dup.x += 1.5; dup.y += 1.5;
-        if (dup.seq) dup.seq += 1;
+        const seqs = dup.getSeqArray();
+        if (seqs.length > 0) {
+          const nextSeqs = seqs.map(n => n + 1);
+          dup.seq = nextSeqs.length === 1 ? nextSeqs[0] : nextSeqs;
+          if (dup.badgeAngles && typeof dup.badgeAngles === 'object') {
+            const nextAngles = {};
+            seqs.forEach((oldSeq, i) => {
+              if (dup.badgeAngles[oldSeq] !== undefined) {
+                nextAngles[nextSeqs[i]] = dup.badgeAngles[oldSeq];
+              }
+            });
+            dup.badgeAngles = nextAngles;
+          }
+        }
         this.obstacles.push(dup);
         newItems.push(dup);
       });
@@ -1780,46 +1812,70 @@
       this.ctx.restore();
     }
     _renderGrid() {
-      const wPx = this.field.toPixels(this.field.widthMeters);
-      const hPx = this.field.toPixels(this.field.lengthMeters);
-      const gridStep = this.field.gridSizeMeters || 1.0;
+      const wM = this.field.widthMeters;
+      const hM = this.field.lengthMeters;
+      const wPx = this.field.toPixels(wM);
+      const hPx = this.field.toPixels(hM);
+      const gridStep = Math.max(0.1, this.field.gridSizeMeters || 1.0);
+      const poly = this.field.getBoundaryPolygon();
 
       this.ctx.save();
       this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
       this.ctx.lineWidth = 1;
 
-      const totalW = Math.round(this.field.widthMeters);
-      const totalH = Math.round(this.field.lengthMeters);
+      if (poly.length > 0) {
+        this.ctx.save();
+        this.ctx.beginPath();
+        poly.forEach((pt, i) => {
+          const px = this.field.toPixels(pt.x);
+          const py = this.field.toPixels(pt.y);
+          if (i === 0) this.ctx.moveTo(px, py);
+          else this.ctx.lineTo(px, py);
+        });
+        this.ctx.closePath();
+        this.ctx.clip();
 
-      // Draw vertical grid lines and labels (Top & Bottom sides)
-      for (let xM = 0; xM <= totalW; xM += gridStep) {
-        const xPx = this.field.toPixels(xM);
-        this.ctx.beginPath(); this.ctx.moveTo(xPx, 0); this.ctx.lineTo(xPx, hPx); this.ctx.stroke();
-
-        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.65)';
-        this.ctx.font = '10px sans-serif';
-        this.ctx.textAlign = 'center';
-
-        // Top side label
-        this.ctx.fillText(`${xM}`, xPx, -6);
-        // Bottom side label
-        this.ctx.fillText(`${xM}`, xPx, hPx + 14);
+        this.ctx.beginPath();
+        for (let i = 0; ; i++) {
+          const xM = Math.round(i * gridStep * 1000) / 1000;
+          if (xM > wM + 1e-6) break;
+          const xPx = this.field.toPixels(xM);
+          this.ctx.moveTo(xPx, 0);
+          this.ctx.lineTo(xPx, hPx);
+        }
+        for (let i = 0; ; i++) {
+          const yM = Math.round(i * gridStep * 1000) / 1000;
+          if (yM > hM + 1e-6) break;
+          const yPx = this.field.toPixels(yM);
+          this.ctx.moveTo(0, yPx);
+          this.ctx.lineTo(wPx, yPx);
+        }
+        this.ctx.stroke();
+        this.ctx.restore();
       }
 
-      // Draw horizontal grid lines and labels (Left & Right sides)
-      for (let yM = 0; yM <= totalH; yM += gridStep) {
+      this.ctx.fillStyle = 'rgba(255, 255, 255, 0.65)';
+      this.ctx.font = '10px sans-serif';
+
+      this.ctx.textAlign = 'center';
+      for (let i = 0; ; i++) {
+        const xM = Math.round(i * gridStep * 1000) / 1000;
+        if (xM > wM + 1e-6) break;
+        const xPx = this.field.toPixels(xM);
+        const lbl = `${Number(xM.toFixed(2))}`;
+        this.ctx.fillText(lbl, xPx, -6);
+        this.ctx.fillText(lbl, xPx, hPx + 14);
+      }
+
+      for (let i = 0; ; i++) {
+        const yM = Math.round(i * gridStep * 1000) / 1000;
+        if (yM > hM + 1e-6) break;
         const yPx = this.field.toPixels(yM);
-        this.ctx.beginPath(); this.ctx.moveTo(0, yPx); this.ctx.lineTo(wPx, yPx); this.ctx.stroke();
-
-        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.65)';
-        this.ctx.font = '10px sans-serif';
-
-        // Left side label
+        const lbl = `${Number(yM.toFixed(2))}`;
         this.ctx.textAlign = 'right';
-        this.ctx.fillText(`${yM}`, -6, yPx + 4);
-        // Right side label
+        this.ctx.fillText(lbl, -6, yPx + 4);
         this.ctx.textAlign = 'left';
-        this.ctx.fillText(`${yM}`, wPx + 6, yPx + 4);
+        this.ctx.fillText(lbl, wPx + 6, yPx + 4);
       }
 
       this.ctx.restore();
@@ -1830,8 +1886,40 @@
       const distText = formatDistance(distance(this.measureStart, this.measureEnd), this.field.unit);
 
       this.ctx.save();
-      this.ctx.strokeStyle = '#f43f5e'; this.ctx.lineWidth = 2.5; this.ctx.setLineDash([6, 4]);
-      this.ctx.beginPath(); this.ctx.moveTo(p1.x, p1.y); this.ctx.lineTo(p2.x, p2.y); this.ctx.stroke();
+      this.ctx.strokeStyle = '#f43f5e';
+      this.ctx.lineWidth = 2.5;
+      this.ctx.setLineDash([6, 4]);
+      this.ctx.beginPath();
+      this.ctx.moveTo(p1.x, p1.y);
+      this.ctx.lineTo(p2.x, p2.y);
+      this.ctx.stroke();
+      this.ctx.setLineDash([]);
+
+      this.ctx.fillStyle = '#f43f5e';
+      [p1, p2].forEach(pt => {
+        this.ctx.beginPath();
+        this.ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
+        this.ctx.fill();
+      });
+
+      const midX = (p1.x + p2.x) / 2;
+      const midY = (p1.y + p2.y) / 2 - 14;
+      this.ctx.font = 'bold 11px sans-serif';
+      const padX = 8;
+      const boxW = this.ctx.measureText(distText).width + padX * 2;
+      const boxH = 20;
+      this.ctx.fillStyle = '#0f172a';
+      this.ctx.strokeStyle = '#f43f5e';
+      this.ctx.lineWidth = 1.5;
+      this.ctx.beginPath();
+      this.ctx.roundRect(midX - boxW / 2, midY - boxH / 2, boxW, boxH, 6);
+      this.ctx.fill();
+      this.ctx.stroke();
+
+      this.ctx.fillStyle = '#ffffff';
+      this.ctx.textAlign = 'center';
+      this.ctx.textBaseline = 'middle';
+      this.ctx.fillText(distText, midX, midY);
       this.ctx.restore();
     }
     _initEvents() {
@@ -1841,32 +1929,144 @@
       window.addEventListener('mouseup', e => this._onMouseUp(e));
       this.canvas.addEventListener('wheel', e => this._onWheel(e), { passive: false });
 
-      // Touch events
-      this.canvas.addEventListener('touchstart', e => {
-        if (e.touches.length === 1) {
-          const t = e.touches[0];
-          this._onMouseDown({ clientX: t.clientX, clientY: t.clientY, button: 0 });
+      window.addEventListener('keydown', e => {
+        if (e.code === 'Space') {
+          const tag = e.target?.tagName;
+          if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target?.isContentEditable) return;
+          if (document.getElementById('view-2d-container')?.classList.contains('active')) {
+            this.isSpacePressed = true;
+            if (!this.isPanning) this.canvas.style.cursor = 'grab';
+            e.preventDefault();
+          }
         }
-      }, { passive: false });
-      this.canvas.addEventListener('touchmove', e => {
-        if (e.touches.length === 1) {
-          const t = e.touches[0];
-          this._onMouseMove({ clientX: t.clientX, clientY: t.clientY });
+      });
+      window.addEventListener('keyup', e => {
+        if (e.code === 'Space') {
+          this.isSpacePressed = false;
+          if (!this.isPanning && this.canvas.style.cursor === 'grab') {
+            this.canvas.style.cursor = 'default';
+          }
         }
-      }, { passive: false });
-      this.canvas.addEventListener('touchend', () => this._onMouseUp());
+      });
+      window.addEventListener('blur', () => {
+        this.isSpacePressed = false;
+      });
+
+      // Touch events (1-finger interact/pan, 2-finger pinch-zoom & pan)
+      this.canvas.addEventListener('touchstart', e => this._onTouchStart(e), { passive: false });
+      this.canvas.addEventListener('touchmove', e => this._onTouchMove(e), { passive: false });
+      this.canvas.addEventListener('touchend', e => this._onTouchEnd(e), { passive: false });
+      this.canvas.addEventListener('touchcancel', e => this._onTouchEnd(e), { passive: false });
+    }
+
+    _onTouchStart(e) {
+      if (e.cancelable) e.preventDefault();
+      if (e.touches.length === 1) {
+        this.isTouchPinching = false;
+        const t = e.touches[0];
+        this._onMouseDown({ clientX: t.clientX, clientY: t.clientY, button: 0 });
+      } else if (e.touches.length === 2) {
+        this.isTouchPinching = true;
+        this.isDragging = false;
+        this.isPanning = false;
+        this.panStartedOnEmpty = false;
+        this.isRotating = false;
+        this.isDraggingTunnelNode = false;
+        this.isDraggingPathNode = false;
+        this.isDraggingBadge = false;
+
+        const t1 = e.touches[0];
+        const t2 = e.touches[1];
+        this.touchPinchDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+        this.touchPinchCenter = {
+          x: (t1.clientX + t2.clientX) / 2,
+          y: (t1.clientY + t2.clientY) / 2
+        };
+      }
+    }
+
+    _onTouchMove(e) {
+      if (e.cancelable) e.preventDefault();
+      if (e.touches.length === 1 && !this.isTouchPinching) {
+        const t = e.touches[0];
+        this._onMouseMove({ clientX: t.clientX, clientY: t.clientY });
+      } else if (e.touches.length === 2) {
+        const t1 = e.touches[0];
+        const t2 = e.touches[1];
+        const newDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+        const newCenter = {
+          x: (t1.clientX + t2.clientX) / 2,
+          y: (t1.clientY + t2.clientY) / 2
+        };
+
+        if (this.touchPinchDist > 0) {
+          this.panX += newCenter.x - this.touchPinchCenter.x;
+          this.panY += newCenter.y - this.touchPinchCenter.y;
+
+          const scaleChange = newDist / this.touchPinchDist;
+          if (Math.abs(scaleChange - 1) > 0.005) {
+            const newZoom = Math.min(Math.max(0.3, this.zoom * scaleChange), 4.0);
+            const rect = this.canvas.getBoundingClientRect();
+            const mX = newCenter.x - rect.left;
+            const mY = newCenter.y - rect.top;
+            this.panX = mX - (mX - this.panX) * (newZoom / this.zoom);
+            this.panY = mY - (mY - this.panY) * (newZoom / this.zoom);
+            this.zoom = newZoom;
+          }
+          this.render();
+        }
+
+        this.touchPinchDist = newDist;
+        this.touchPinchCenter = newCenter;
+      }
+    }
+
+    _onTouchEnd(e) {
+      if (e && e.cancelable) e.preventDefault();
+      if (!e || e.touches.length === 0) {
+        this.isTouchPinching = false;
+        this.touchPinchDist = 0;
+        this._onMouseUp();
+      } else if (e.touches.length === 1) {
+        this.touchPinchDist = 0;
+        this.isDragging = false;
+        this.isPanning = false;
+        this.panStartedOnEmpty = false;
+      }
+    }
+
+    _getRotationHandleWorldPos(obs) {
+      const isTunnel = obs.type === OBSTACLE_TYPES.TUNNEL || (typeof obs.type === 'string' && obs.type.startsWith('tunnel'));
+      const bbox = (isTunnel && typeof obs.getTunnelBoundingBox === 'function')
+        ? obs.getTunnelBoundingBox()
+        : { widthMeters: obs.widthMeters, depthMeters: obs.depthMeters, centerOffsetX: 0, centerOffsetY: 0 };
+
+      const dPx = this.field.toPixels(bbox.depthMeters);
+      const halfD = dPx / 2 + 10;
+      return localToWorld(
+        bbox.centerOffsetX || 0,
+        (bbox.centerOffsetY || 0) - this.field.toMeters(halfD + 20),
+        obs.x,
+        obs.y,
+        obs.rotation
+      );
     }
 
     _onMouseDown(e) {
-      if (e.button === 1 || e.spaceKey || this.mode === 'pan') {
+      if (e.button === 1 || this.isSpacePressed || this.mode === 'pan') {
         this.isPanning = true;
+        this.panMoved = false;
+        this.panStartedOnEmpty = false;
+        this.panMouseStart = { x: e.clientX, y: e.clientY };
         this.lastMouse = { x: e.clientX, y: e.clientY };
+        this.canvas.style.cursor = 'grabbing';
         return;
       }
 
       const pos = this.screenToField(e.clientX, e.clientY);
 
       if (this.mode === 'measure') {
+        this.isMeasuring = true;
         this.measureStart = pos;
         this.measureEnd = pos;
         this.render();
@@ -1892,24 +2092,7 @@
       // 1. Check if clicking rotation handle knob of selected obstacle
       if (this.selectedObstacles.length === 1) {
         const activeObs = this.selectedObstacles[0];
-        const isTunnel = activeObs.type === OBSTACLE_TYPES.TUNNEL || (typeof activeObs.type === 'string' && activeObs.type.startsWith('tunnel'));
-        const bbox = (isTunnel && typeof activeObs.getTunnelBoundingBox === 'function')
-          ? activeObs.getTunnelBoundingBox()
-          : { widthMeters: activeObs.widthMeters, depthMeters: activeObs.depthMeters };
-
-        const dPx = this.field.toPixels(bbox.depthMeters);
-        const halfD = dPx / 2 + 10;
-
-        const handleLocalMeters = {
-          x: 0,
-          y: -this.field.toMeters(halfD + 20)
-        };
-        const handleWorldMeters = rotatePoint(
-          { x: activeObs.x + handleLocalMeters.x, y: activeObs.y + handleLocalMeters.y },
-          { x: activeObs.x, y: activeObs.y },
-          activeObs.rotation
-        );
-
+        const handleWorldMeters = this._getRotationHandleWorldPos(activeObs);
         if (distance(pos, handleWorldMeters) < 1.2) {
           this.isRotating = true;
           this.rotatingObs = activeObs;
@@ -1977,24 +2160,32 @@
         }
       }
 
-      // 5. Clicked empty space -> clear obstacle selection
-      if (!e.shiftKey) {
-        this.clearSelection();
+      // 5. Empty canvas space -> pan on drag, or clear selection on click
+      if (e.button === 0) {
+        this.isPanning = true;
+        this.panMoved = false;
+        this.panStartedOnEmpty = !e.shiftKey;
+        this.panMouseStart = { x: e.clientX, y: e.clientY };
+        this.lastMouse = { x: e.clientX, y: e.clientY };
       }
     }
 
     _onMouseMove(e) {
       if (this.isPanning) {
+        if (!this.panMoved && Math.hypot(e.clientX - this.panMouseStart.x, e.clientY - this.panMouseStart.y) > 3) {
+          this.panMoved = true;
+        }
         this.panX += e.clientX - this.lastMouse.x;
         this.panY += e.clientY - this.lastMouse.y;
         this.lastMouse = { x: e.clientX, y: e.clientY };
+        this.canvas.style.cursor = 'grabbing';
         this.render();
         return;
       }
 
       const pos = this.screenToField(e.clientX, e.clientY);
 
-      if (this.mode === 'measure' && this.measureStart) {
+      if (this.mode === 'measure' && this.isMeasuring && this.measureStart) {
         this.measureEnd = pos;
         this.render();
         return;
@@ -2103,20 +2294,7 @@
 
       // 2. Check if hovering over rotation handle knob
       if (!isHoverInteractive && this.selectedObstacles.length === 1) {
-        const activeObs = this.selectedObstacles[0];
-        const isTunnel = activeObs.type === OBSTACLE_TYPES.TUNNEL || (typeof activeObs.type === 'string' && activeObs.type.startsWith('tunnel'));
-        const bbox = (isTunnel && typeof activeObs.getTunnelBoundingBox === 'function')
-          ? activeObs.getTunnelBoundingBox()
-          : { widthMeters: activeObs.widthMeters, depthMeters: activeObs.depthMeters };
-
-        const dPx = this.field.toPixels(bbox.depthMeters);
-        const halfD = dPx / 2 + 10;
-        const handleLocalMeters = { x: 0, y: -this.field.toMeters(halfD + 20) };
-        const handleWorldMeters = rotatePoint(
-          { x: activeObs.x + handleLocalMeters.x, y: activeObs.y + handleLocalMeters.y },
-          { x: activeObs.x, y: activeObs.y },
-          activeObs.rotation
-        );
+        const handleWorldMeters = this._getRotationHandleWorldPos(this.selectedObstacles[0]);
         if (distance(pos, handleWorldMeters) < 1.2) isHoverInteractive = true;
       }
 
@@ -2146,6 +2324,8 @@
         this.canvas.style.cursor = 'crosshair';
       } else if (this.isDragging || this.isDraggingTunnelNode || this.isDraggingPathNode || this.isDraggingBadge || this.isRotating || this.isPanning) {
         this.canvas.style.cursor = 'grabbing';
+      } else if (this.isSpacePressed || this.mode === 'pan') {
+        this.canvas.style.cursor = 'grab';
       } else if (isHoverInteractive) {
         this.canvas.style.cursor = 'pointer';
       } else {
@@ -2154,8 +2334,19 @@
     }
 
     _onMouseUp() {
+      if (this.isMeasuring) {
+        this.isMeasuring = false;
+      }
+
       if (this.isPanning) {
+        const shouldClear = this.panStartedOnEmpty && !this.panMoved;
         this.isPanning = false;
+        this.panStartedOnEmpty = false;
+        this.panMoved = false;
+        this.canvas.style.cursor = this.isSpacePressed ? 'grab' : 'default';
+        if (shouldClear) {
+          this.clearSelection();
+        }
       }
 
       if (this.isDraggingTunnelNode) {
@@ -2967,7 +3158,7 @@
         view3D?.classList.remove('active');
         viewAruco?.classList.remove('active');
         appRoot?.classList.remove('aruco-active');
-        this.canvasEngine.render();
+        this.canvasEngine.resizeCanvas();
       };
 
       const switchTo3D = () => {
