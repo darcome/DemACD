@@ -627,6 +627,11 @@ class ArUcoTrackerUI {
     }
   }
 
+  hideSettingsModal() {
+    document.getElementById('aruco-settings-modal')?.classList.remove('active');
+    document.getElementById('aruco-backdrop')?.classList.remove('active');
+  }
+
   showSettingsModal() {
     const modal = document.getElementById('aruco-settings-modal');
     const backdrop = document.getElementById('aruco-backdrop');
@@ -689,10 +694,7 @@ class ArUcoTrackerUI {
     const saveBtn = document.getElementById('btn-aruco-save-settings');
     const cancelBtn = document.getElementById('btn-aruco-cancel-settings');
 
-    const closeModal = () => {
-      modal.classList.remove('active');
-      backdrop.classList.remove('active');
-    };
+    const closeModal = () => this.hideSettingsModal();
 
     if (cancelBtn) cancelBtn.onclick = closeModal;
     if (backdrop) backdrop.onclick = closeModal;
