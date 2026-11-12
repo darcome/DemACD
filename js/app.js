@@ -963,9 +963,9 @@
       if (j.showDirectionArrows !== undefined) this.showDirectionArrows = j.showDirectionArrows;
       if (j.showControlNodes !== undefined) this.showControlNodes = j.showControlNodes;
       if (j.showBadgePosMode !== undefined) this.showBadgePosMode = j.showBadgePosMode;
-      if (j.segmentControlNodes) {
-        this.segmentControlNodes = j.segmentControlNodes;
-      }
+      this.segmentControlNodes = j.segmentControlNodes
+        ? JSON.parse(JSON.stringify(j.segmentControlNodes))
+        : {};
     }
   }
 
@@ -1688,13 +1688,21 @@
         pathModel: this.pathModel.toJSON()
       };
     }
+    syncHeaderToggles() {
+      document.getElementById('btn-toggle-grid')?.classList.toggle('active', !!this.field.showGrid);
+      document.getElementById('btn-toggle-snap')?.classList.toggle('active', !!this.field.snapToGrid);
+      document.getElementById('btn-toggle-path-nodes')?.classList.toggle('active', !!this.pathModel.showControlNodes);
+    }
     loadSnapshot(s) {
       if (!s) return;
       this.field.fromJSON(s.field, () => this.render());
       this.obstacles = (s.obstacles || []).map(o => Obstacle.fromJSON(o));
       if (s.pathModel) {
         this.pathModel.fromJSON(s.pathModel);
+      } else {
+        this.pathModel.resetSegmentNodes();
       }
+      this.syncHeaderToggles();
       this.clearSelection();
       this.render();
     }
@@ -2335,7 +2343,7 @@
         </div>
 
         <div class="panel-section">
-          <label class="panel-label">Rotation Angle (${obs.rotation}°)</label>
+          <label class="panel-label">Rotation Angle (<span id="prop-rot-val">${obs.rotation}</span>°)</label>
           <input type="range" id="prop-rotation" min="-180" max="180" value="${obs.rotation}" class="app-slider">
           <div class="quick-rot-row">
             <button class="rot-quick-btn" data-rot="0">0°</button>
@@ -2416,11 +2424,20 @@
         });
       });
       this.container.querySelector('#prop-rotation')?.addEventListener('input', e => {
-        obs.rotation = parseInt(e.target.value); this.canvasEngine.render();
+        obs.rotation = parseInt(e.target.value, 10);
+        const rotLabel = this.container.querySelector('#prop-rot-val');
+        if (rotLabel) rotLabel.textContent = obs.rotation;
+        this.canvasEngine.render();
+      });
+      this.container.querySelector('#prop-rotation')?.addEventListener('change', () => {
+        this.historyManager.push(this.canvasEngine.getSnapshot());
       });
       this.container.querySelectorAll('.rot-quick-btn').forEach(btn => {
         btn.addEventListener('click', () => {
-          obs.rotation = parseInt(btn.dataset.rot); this.render(); this.canvasEngine.render();
+          obs.rotation = parseInt(btn.dataset.rot, 10);
+          this.render();
+          this.canvasEngine.render();
+          this.historyManager.push(this.canvasEngine.getSnapshot());
         });
       });
       this.container.querySelector('#btn-straighten-tunnel')?.addEventListener('click', () => {
@@ -2539,7 +2556,9 @@
           </div>
         </div>
       `;
-      this.modal.querySelector('.close-modal-btn').addEventListener('click', () => this.hide());
+      this.modal.querySelectorAll('.close-modal-btn').forEach(btn => {
+        btn.addEventListener('click', () => this.hide());
+      });
       this.modal.querySelector('.modal-backdrop').addEventListener('click', () => this.hide());
 
       this.modal.querySelectorAll('.shape-option').forEach(opt => {
@@ -2561,6 +2580,7 @@
         uploadBtn.addEventListener('click', () => fileInput.click());
         fileInput.addEventListener('change', e => {
           const file = e.target.files[0];
+          e.target.value = '';
           if (file) {
             const reader = new FileReader();
             reader.onload = evt => {
@@ -2700,7 +2720,9 @@
           <div class="modal-footer"><button class="sec-btn close-modal-btn">Close</button></div>
         </div>
       `;
-      this.modal.querySelector('.close-modal-btn').addEventListener('click', () => this.hide());
+      this.modal.querySelectorAll('.close-modal-btn').forEach(btn => {
+        btn.addEventListener('click', () => this.hide());
+      });
       this.modal.querySelector('.modal-backdrop').addEventListener('click', () => this.hide());
 
       this.modal.querySelector('#btn-export-png').addEventListener('click', () => {
@@ -2727,6 +2749,7 @@
       importCard.addEventListener('click', () => fileInput.click());
       fileInput.addEventListener('change', e => {
         const file = e.target.files[0];
+        e.target.value = '';
         if (!file) return;
         const reader = new FileReader();
         reader.onload = evt => {
@@ -2897,6 +2920,16 @@
         : 'Lock the 3D course where it is now, ignoring the markers from then on';
     }
 
+    _undo() {
+      const prev = this.historyManager.undo(this.canvasEngine.getSnapshot());
+      if (prev) this.canvasEngine.loadSnapshot(prev);
+    }
+
+    _redo() {
+      const next = this.historyManager.redo(this.canvasEngine.getSnapshot());
+      if (next) this.canvasEngine.loadSnapshot(next);
+    }
+
     _bindHeaderActions() {
       // Dynamic Viewport Height (--dvh) fix for iOS Safari & mobile browsers
       const updateViewportHeight = () => {
@@ -2913,14 +2946,8 @@
         if (undoBtn) undoBtn.disabled = !canUndo;
         if (redoBtn) redoBtn.disabled = !canRedo;
       });
-      undoBtn?.addEventListener('click', () => {
-        const prev = this.historyManager.undo(this.canvasEngine.getSnapshot());
-        if (prev) this.canvasEngine.loadSnapshot(prev);
-      });
-      redoBtn?.addEventListener('click', () => {
-        const next = this.historyManager.redo(this.canvasEngine.getSnapshot());
-        if (next) this.canvasEngine.loadSnapshot(next);
-      });
+      undoBtn?.addEventListener('click', () => this._undo());
+      redoBtn?.addEventListener('click', () => this._redo());
 
       // 2D / 3D / ArUco View Mode Tab Switching
       const tab2D = document.getElementById('tab-btn-2d');
@@ -3019,9 +3046,20 @@
 
       // Mobile ArUco Sidebar Drawer Toggle
       const btnArucoToggleSidebar = document.getElementById('btn-aruco-toggle-sidebar');
+      const btnArucoCloseSidebar = document.getElementById('btn-aruco-close-sidebar');
       const arucoSidebar = document.querySelector('.aruco-ui-sidebar');
-      btnArucoToggleSidebar?.addEventListener('click', () => {
+      const arucoViewport = document.querySelector('.aruco-camera-viewport');
+      btnArucoToggleSidebar?.addEventListener('click', e => {
+        e.stopPropagation();
         arucoSidebar?.classList.toggle('open');
+      });
+      btnArucoCloseSidebar?.addEventListener('click', () => {
+        arucoSidebar?.classList.remove('open');
+      });
+      arucoViewport?.addEventListener('click', () => {
+        if (arucoSidebar?.classList.contains('open')) {
+          arucoSidebar.classList.remove('open');
+        }
       });
 
       // AR 3D Viewport Controls
@@ -3122,6 +3160,8 @@
       });
       document.getElementById('btn-clear')?.addEventListener('click', () => {
         if (confirm('Clear canvas obstacles?')) {
+          this.canvasEngine.clearSelection();
+          this.pathModel.resetSegmentNodes();
           this.canvasEngine.setObstacles([]);
           this.historyManager.push(this.canvasEngine.getSnapshot());
         }
@@ -3141,6 +3181,7 @@
       });
       bgImageFileInput?.addEventListener('change', e => {
         const file = e.target.files[0];
+        e.target.value = '';
         if (!file) return;
         const reader = new FileReader();
         reader.onload = evt => {
@@ -3158,6 +3199,7 @@
       importHeaderBtn?.addEventListener('click', () => headerFileInput?.click());
       headerFileInput?.addEventListener('change', e => {
         const file = e.target.files[0];
+        e.target.value = '';
         if (!file) return;
         const reader = new FileReader();
         reader.onload = evt => {
@@ -3190,6 +3232,59 @@
       document.getElementById('btn-toggle-snap')?.addEventListener('click', () => {
         this.field.snapToGrid = !this.field.snapToGrid;
         document.getElementById('btn-toggle-snap').classList.toggle('active', this.field.snapToGrid);
+      });
+
+      document.addEventListener('keydown', e => {
+        if (e.key === 'Escape') {
+          if (this.fieldModal.modal.classList.contains('active')) {
+            this.fieldModal.hide();
+            return;
+          }
+          if (this.exportModal.modal.classList.contains('active')) {
+            this.exportModal.hide();
+            return;
+          }
+          const arucoModal = document.getElementById('aruco-settings-modal');
+          if (arucoModal?.classList.contains('active')) {
+            window.arucoTracker?.hideSettingsModal();
+            return;
+          }
+          if (arucoSidebar?.classList.contains('open')) {
+            arucoSidebar.classList.remove('open');
+            return;
+          }
+        }
+
+        const tag = e.target?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target?.isContentEditable) {
+          return;
+        }
+        if (this.fieldModal.modal.classList.contains('active') ||
+            this.exportModal.modal.classList.contains('active') ||
+            document.getElementById('aruco-settings-modal')?.classList.contains('active')) {
+          return;
+        }
+
+        if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+          const key = e.key.toLowerCase();
+          if (key === 'z' && !e.shiftKey) {
+            e.preventDefault();
+            this._undo();
+            return;
+          }
+          if (key === 'y' || (key === 'z' && e.shiftKey)) {
+            e.preventDefault();
+            this._redo();
+            return;
+          }
+        }
+
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+          if (this.canvasEngine.selectedObstacles.length > 0 && view2D?.classList.contains('active')) {
+            e.preventDefault();
+            this.canvasEngine.deleteSelected();
+          }
+        }
       });
     }
   }
