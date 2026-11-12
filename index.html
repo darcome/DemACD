@@ -65,7 +65,7 @@
         <div class="brand-logo">
           <i class="fa-solid fa-dog"></i>
         </div>
-        <div class="brand-title">Agility Course Designer 1.4.0</div>
+        <div class="brand-title">Agility Course Designer 1.9.0</div>
       </div>
 
       <!-- 2D / 3D / ArUco View Mode Tab Switcher -->
@@ -253,7 +253,7 @@
                 <button id="btn-toggle-ar-3d" class="aruco-hud-btn sec-btn active" title="Toggle 3D Agility Course Overlay">
                   <i class="fa-solid fa-cube"></i> 3D Course
                 </button>
-                <button id="btn-ar-lock-anchor" class="aruco-hud-btn sec-btn" title="Lock 3D Course Anchor to walk around the field without marker in view">
+                <button id="btn-ar-lock-anchor" class="aruco-hud-btn sec-btn" title="Lock the 3D course where it is now, ignoring the markers from then on">
                   <i class="fa-solid fa-anchor"></i> Lock Anchor
                 </button>
                 <div class="aruco-ground-slider-wrap" title="Adjust AR Ground Transparency">
@@ -382,11 +382,43 @@
           <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px;">
             <div>
               <label style="font-size: 13px; font-weight: 600; color: var(--text-main); display: block;">
+                <i class="fa-solid fa-layer-group" style="color: var(--accent-blue);"></i> Marker Placement
+              </label>
+              <span style="font-size: 11px; color: var(--text-dim); display: block; margin-top: 2px;">
+                Flat: lying on the ground, top edge toward the top side of the field. Upright: standing on a pedestal, facing the center of the field.
+              </span>
+            </div>
+            <select class="app-input" id="input-aruco-placement" style="width: 110px;">
+              <option value="flat">Flat</option>
+              <option value="upright">Upright</option>
+            </select>
+          </div>
+          <div id="row-aruco-marker-height" style="display: none; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px;">
+            <div>
+              <label style="font-size: 13px; font-weight: 600; color: var(--text-main); display: block;">
+                <i class="fa-solid fa-arrows-up-down" style="color: var(--accent-blue);"></i> Marker Center Height
+              </label>
+              <span style="font-size: 11px; color: var(--text-dim); display: block; margin-top: 2px;">
+                Upright markers: height of the CENTER of the marker above the ground, in meters
+              </span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <input type="number" step="0.05" min="0" max="5" class="app-input" id="input-aruco-marker-height" value="1.0" style="width: 75px; text-align: center;">
+              <span style="font-size: 12px; color: var(--text-muted); font-weight: 600;">m</span>
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px;">
+            <div>
+              <label style="font-size: 13px; font-weight: 600; color: var(--text-main); display: block;">
                 <i class="fa-solid fa-camera" style="color: var(--accent-blue);"></i> Camera Field of View
               </label>
               <span style="font-size: 11px; color: var(--text-dim); display: block; margin-top: 2px;">
-                Angle across the longer side of the video (phones ~65&deg;, webcams ~60-70&deg;). Tune it if the 3D course drifts away from the markers.
+                Angle across the longer side of the video (phones ~65&deg;, webcams ~60-70&deg;). With Auto it is only the starting value: the real one is measured once 4 or more markers are in view.
               </span>
+              <label style="font-size: 12px; color: var(--text-main); display: flex; align-items: center; gap: 6px; margin-top: 6px;">
+                <input type="checkbox" id="input-aruco-fov-auto" checked> Auto (measure from the markers)
+                <span id="aruco-fov-measured" style="color: var(--text-dim);"></span>
+              </label>
             </div>
             <div style="display: flex; align-items: center; gap: 6px;">
               <input type="number" step="1" min="20" max="150" class="app-input" id="input-aruco-fov" value="65" style="width: 75px; text-align: center;">

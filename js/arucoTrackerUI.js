@@ -78,6 +78,11 @@ class ArUcoTrackerUI {
     document.getElementById('btn-aruco-reset')?.addEventListener('click', () => {
       this.resetStates();
       this.updateUI();
+      // Also forget the 3D alignment and what was learned about the markers
+      if (window.arucoFieldTracker) window.arucoFieldTracker.reset();
+      if (window.agilityApp && typeof window.agilityApp._syncArLockButton === 'function') {
+        window.agilityApp._syncArLockButton();
+      }
     });
 
     document.getElementById('btn-aruco-export')?.addEventListener('click', () => {
@@ -91,6 +96,81 @@ class ArUcoTrackerUI {
     // Flip Camera button (Front <-> Rear)
     document.getElementById('btn-flip-camera')?.addEventListener('click', () => {
       this.flipCamera();
+    });
+
+    // Initialize AR Course Walkthrough Engine
+    this.isArEnabled = false;
+    const arCanvas = document.getElementById('arBabylonCanvas');
+    if (arCanvas && typeof ARCourseEngine !== 'undefined') {
+      window.arCourseEngine = new ARCourseEngine(arCanvas);
+    }
+
+    // AR Mode Toggle Button
+    const arBtn = document.getElementById('btn-toggle-ar');
+    const arLabel = document.getElementById('ar-toggle-label');
+    const arBadge = document.getElementById('ar-tracking-badge');
+    const arPill = document.getElementById('ar-active-pill');
+
+    arBtn?.addEventListener('click', () => {
+      this.isArEnabled = !this.isArEnabled;
+      arBtn.classList.toggle('active', this.isArEnabled);
+      if (arLabel) arLabel.textContent = this.isArEnabled ? 'ON' : 'OFF';
+      if (arPill) {
+        arPill.textContent = this.isArEnabled ? 'Active (Live 3D)' : 'Disabled';
+        arPill.style.color = this.isArEnabled ? '#34d399' : 'var(--text-dim)';
+      }
+      if (arBadge) {
+        arBadge.style.display = this.isArEnabled ? 'inline-flex' : 'none';
+      }
+      if (window.arCourseEngine) {
+        window.arCourseEngine.setArActive(this.isArEnabled);
+        if (window.app) {
+          window.arCourseEngine.updateCourse(window.app.field, window.app.canvasEngine?.obstacles, window.app.pathModel);
+        }
+      }
+    });
+
+    // AR Ground Opacity Slider
+    const arGroundSlider = document.getElementById('slider-ar-ground-opacity');
+    const arGroundVal = document.getElementById('val-ar-ground-opacity');
+    arGroundSlider?.addEventListener('input', (e) => {
+      const val = parseFloat(e.target.value);
+      if (arGroundVal) {
+        arGroundVal.textContent = val === 0 ? '0% (Grass)' : `${Math.round(val * 100)}% Turf`;
+      }
+      if (window.arCourseEngine) {
+        window.arCourseEngine.setGroundOpacity(val);
+      }
+    });
+
+    // AR Marker Physical Size Input
+    const markerSizeInput = document.getElementById('input-ar-marker-size');
+    markerSizeInput?.addEventListener('input', (e) => {
+      const cm = parseFloat(e.target.value) || 20;
+      if (window.arCourseEngine) {
+        window.arCourseEngine.setMarkerSize(cm / 100);
+      }
+    });
+
+    // AR Trajectory & Number Toggles
+    const arTrajBtn = document.getElementById('btn-toggle-ar-traj');
+    arTrajBtn?.addEventListener('click', () => {
+      if (!window.arCourseEngine) return;
+      window.arCourseEngine.showTrajectory = !window.arCourseEngine.showTrajectory;
+      arTrajBtn.classList.toggle('active', window.arCourseEngine.showTrajectory);
+      if (window.app) {
+        window.arCourseEngine.updateCourse(window.app.field, window.app.canvasEngine?.obstacles, window.app.pathModel);
+      }
+    });
+
+    const arNumsBtn = document.getElementById('btn-toggle-ar-nums');
+    arNumsBtn?.addEventListener('click', () => {
+      if (!window.arCourseEngine) return;
+      window.arCourseEngine.showObstacleNumbers = !window.arCourseEngine.showObstacleNumbers;
+      arNumsBtn.classList.toggle('active', window.arCourseEngine.showObstacleNumbers);
+      if (window.app) {
+        window.arCourseEngine.updateCourse(window.app.field, window.app.canvasEngine?.obstacles, window.app.pathModel);
+      }
     });
 
     this.initCameraDevices();
@@ -328,6 +408,11 @@ class ArUcoTrackerUI {
       if (fpsEl) fpsEl.textContent = `${this.currentFps} FPS`;
     }
 
+    // AR 6-DoF Pose Tracking Update
+    if (this.isArEnabled && window.arCourseEngine) {
+      window.arCourseEngine.updatePose(markers, this.idMapping);
+    }
+
     this.updateUI();
   }
 
@@ -553,8 +638,30 @@ class ArUcoTrackerUI {
       sizeInput.value = this.markerSizeMeters || 0.25;
     }
     const fovInput = document.getElementById('input-aruco-fov');
-    if (fovInput && window.arucoPoseEstimator) {
-      fovInput.value = window.arucoPoseEstimator.fovDegrees;
+    if (fovInput && window.arucoFieldTracker) {
+      fovInput.value = window.arucoFieldTracker.fovDegrees;
+      const autoInput = document.getElementById('input-aruco-fov-auto');
+      const measuredEl = document.getElementById('aruco-fov-measured');
+      if (autoInput) autoInput.checked = window.arucoFieldTracker.autoFov;
+      if (measuredEl) {
+        const measured = window.arucoFieldTracker.cal && window.arucoFieldTracker.cal.focalRatio;
+        measuredEl.textContent = measured
+          ? `- measured: ${window.arucoFieldTracker.effectiveFovDegrees.toFixed(1)}°`
+          : '- not measured yet';
+      }
+    }
+    // Marker placement (flat / upright) and, for upright markers, the height of their center
+    const placementInput = document.getElementById('input-aruco-placement');
+    const heightInput = document.getElementById('input-aruco-marker-height');
+    const heightRow = document.getElementById('row-aruco-marker-height');
+    if (placementInput && window.arucoFieldTracker) {
+      placementInput.value = window.arucoFieldTracker.markerPlacement;
+      if (heightInput) heightInput.value = window.arucoFieldTracker.markerHeightMeters;
+      const syncHeightRow = () => {
+        if (heightRow) heightRow.style.display = placementInput.value === 'upright' ? 'flex' : 'none';
+      };
+      placementInput.onchange = syncHeightRow;
+      syncHeightRow();
     }
 
     const list = document.getElementById('aruco-settings-inputs');
@@ -598,16 +705,29 @@ class ArUcoTrackerUI {
           const sizeVal = parseFloat(sizeInput.value);
           if (sizeVal > 0) {
             this.markerSizeMeters = sizeVal;
-            if (window.arucoPoseEstimator) {
-              window.arucoPoseEstimator.setMarkerSize(sizeVal);
+            if (window.arucoFieldTracker) {
+              window.arucoFieldTracker.setMarkerSize(sizeVal);
             }
+          }
+        }
+
+        // Save marker placement and (upright) marker center height
+        const placementInput = document.getElementById('input-aruco-placement');
+        const heightInput = document.getElementById('input-aruco-marker-height');
+        if (placementInput && window.arucoFieldTracker) {
+          window.arucoFieldTracker.setMarkerPlacement(placementInput.value);
+          if (heightInput) window.arucoFieldTracker.setMarkerHeight(heightInput.value);
+          if (window.agilityApp && typeof window.agilityApp._syncArLockButton === 'function') {
+            window.agilityApp._syncArLockButton();
           }
         }
 
         // Save camera field of view
         const fovInput = document.getElementById('input-aruco-fov');
-        if (fovInput && window.arucoPoseEstimator) {
-          window.arucoPoseEstimator.setFov(fovInput.value);
+        if (fovInput && window.arucoFieldTracker) {
+          window.arucoFieldTracker.setFov(fovInput.value);
+          const autoInput = document.getElementById('input-aruco-fov-auto');
+          if (autoInput) window.arucoFieldTracker.setAutoFov(autoInput.checked);
         }
 
         // Save marker IDs
