@@ -37,7 +37,10 @@ class ArucoCameraDetector {
     this.width = 0;
     this.height = 0;
     this.isRunning = false;
+    this.isPaused = false;
     this._raf = null;
+    this._startToken = 0;
+    this._abortStart = null;
     this._ownsStream = false;
     this._lastErrorLog = 0;
 
@@ -45,8 +48,10 @@ class ArucoCameraDetector {
     this.stage = document.getElementById('aruco-canvas-stage');
     this.wrapper = this.stage ? this.stage.parentElement : null;
     this._fitStage = this._fitStage.bind(this);
+    this._stageObserver = null;
     if (this.wrapper && typeof ResizeObserver !== 'undefined') {
-      new ResizeObserver(this._fitStage).observe(this.wrapper);
+      this._stageObserver = new ResizeObserver(this._fitStage);
+      this._stageObserver.observe(this.wrapper);
     }
     window.addEventListener('resize', this._fitStage);
   }
@@ -93,30 +98,101 @@ class ArucoCameraDetector {
    *        existing stream to analyze
    */
   async start(source = { video: { facingMode: { ideal: 'environment' } } }) {
-    if (this.isRunning) this.stop();
+    if (this.isRunning || this._abortStart) this.stop();
+    const token = ++this._startToken;
 
+    let stream = null;
     if (source && source.stream) {
       this.video.srcObject = source.stream;
       this._ownsStream = false;
     } else {
-      this.video.srcObject = await navigator.mediaDevices.getUserMedia(source);
+      stream = await navigator.mediaDevices.getUserMedia(source);
+      if (token !== this._startToken) {
+        stream.getTracks().forEach(track => track.stop());
+        return;
+      }
+      this.video.srcObject = stream;
       this._ownsStream = true;
     }
 
-    await new Promise((resolve, reject) => {
-      const done = () => { this.video.removeEventListener('loadeddata', done); resolve(); };
-      if (this.video.readyState >= 2 && this.video.videoWidth > 0) resolve();
-      else this.video.addEventListener('loadeddata', done);
-      const p = this.video.play();
-      if (p && typeof p.catch === 'function') p.catch(reject);
-    });
+    try {
+      await new Promise((resolve, reject) => {
+        let settled = false;
+        const cleanup = () => {
+          this.video.removeEventListener('loadeddata', onLoaded);
+          this.video.removeEventListener('error', onError);
+          this._abortStart = null;
+        };
+        const onLoaded = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve();
+        };
+        const onError = (err) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(err instanceof Error ? err : new Error('Video playback failed'));
+        };
+        this._abortStart = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve();
+        };
+
+        if (this.video.readyState >= 2 && this.video.videoWidth > 0) {
+          onLoaded();
+        } else {
+          this.video.addEventListener('loadeddata', onLoaded);
+          this.video.addEventListener('error', onError);
+          const p = this.video.play();
+          if (p && typeof p.catch === 'function') p.catch(onError);
+        }
+      });
+    } catch (err) {
+      if (token === this._startToken) this.stop();
+      throw err;
+    }
+
+    if (token !== this._startToken) {
+      if (this._ownsStream && this.video.srcObject === stream && stream) {
+        stream.getTracks().forEach(track => track.stop());
+        this.video.srcObject = null;
+      }
+      return;
+    }
 
     this.isRunning = true;
-    this._tick();
+    if (!this.isPaused) {
+      this._tick();
+    }
+  }
+
+  /** Pauses/resumes OpenCV frame processing without tearing down the camera stream. */
+  setPaused(paused) {
+    const next = !!paused;
+    if (next === this.isPaused) return;
+    this.isPaused = next;
+    if (this.isPaused) {
+      if (this._raf) {
+        cancelAnimationFrame(this._raf);
+        this._raf = null;
+      }
+    } else if (this.isRunning && !this._raf) {
+      this._tick();
+    }
   }
 
   /** Stops the loop and the camera; OpenCV objects are kept for the next start. */
   stop() {
+    this._startToken++;
+    if (this._abortStart) {
+      const abort = this._abortStart;
+      this._abortStart = null;
+      abort();
+    }
     this.isRunning = false;
     if (this._raf) {
       cancelAnimationFrame(this._raf);
@@ -130,9 +206,14 @@ class ArucoCameraDetector {
     this._releaseFrames();
   }
 
-  /** Releases all WebAssembly memory. */
+  /** Releases all WebAssembly memory and detaches listeners. */
   destroy() {
     this.stop();
+    if (this._stageObserver) {
+      this._stageObserver.disconnect();
+      this._stageObserver = null;
+    }
+    window.removeEventListener('resize', this._fitStage);
     for (const name of ['corners', 'ids', 'rejected', 'arucoDetector', 'params', 'refineParams', 'dictionary']) {
       if (this[name]) { this[name].delete(); this[name] = null; }
     }
@@ -146,7 +227,8 @@ class ArucoCameraDetector {
   }
 
   _tick = () => {
-    if (!this.isRunning) return;
+    this._raf = null;
+    if (!this.isRunning || this.isPaused) return;
     try {
       this._processFrame();
     } catch (err) {
@@ -159,7 +241,9 @@ class ArucoCameraDetector {
         console.error('[ArUco] Frame processing error:', msg);
       }
     }
-    this._raf = requestAnimationFrame(this._tick);
+    if (this.isRunning && !this.isPaused) {
+      this._raf = requestAnimationFrame(this._tick);
+    }
   };
 
   _processFrame() {
@@ -289,6 +373,11 @@ function setupArucoDetector() {
         }
       }
     });
+
+    const viewAruco = document.getElementById('view-aruco-container');
+    if (viewAruco && !viewAruco.classList.contains('active')) {
+      detector.setPaused(true);
+    }
 
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');

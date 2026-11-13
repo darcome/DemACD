@@ -23,12 +23,15 @@ class ArUcoTrackerUI {
     this.markerDefinitions.forEach(m => {
       this.idMapping[m.key] = m.defaultId;
     });
+    this._idToKeyMap = {};
+    this._rebuildIdMap();
 
     // History state per marker key: { status: 'unseen'|'seen'|'live', lastSeenTime: null, lastCenter: null, lastCorners: null }
     this.markerStates = {};
     this.resetStates();
 
     this.currentCamera = 'environment'; // 'environment' (rear), 'user' (front), or specific deviceId
+    this._lastFacingMode = 'environment';
     this.markerSizeMeters = 0.25;       // Default 25 cm physical marker size
     this.isOpenCvReady = false;
     this.isStreaming = false;
@@ -37,16 +40,29 @@ class ArUcoTrackerUI {
     this.fpsLastTime = performance.now();
     this.currentFps = 0;
 
+    // Cached DOM references & previous rendered snapshots to avoid per-frame DOM thrashing
+    this._dom = {};
+    this._cardRefs = {};
+    this._cardPrev = {};
+    this._svgNodes = {};
+    this._svgPrev = {};
+    this._metricsPrev = {};
+
     this.tickerInterval = null;
     this.initDOM();
   }
 
-  getIdToKeyMap() {
+  _rebuildIdMap() {
     const map = {};
     this.markerDefinitions.forEach(m => {
       map[this.idMapping[m.key]] = m.key;
     });
+    this._idToKeyMap = map;
     return map;
+  }
+
+  getIdToKeyMap() {
+    return this._idToKeyMap;
   }
 
   resetStates() {
@@ -66,6 +82,7 @@ class ArUcoTrackerUI {
   }
 
   initDOM() {
+    this._cacheStaticDom();
     this.renderMarkerCards();
     this.renderFieldSvg();
     this.updateMetrics();
@@ -98,87 +115,29 @@ class ArUcoTrackerUI {
       this.flipCamera();
     });
 
-    // Initialize AR Course Walkthrough Engine
-    this.isArEnabled = false;
-    const arCanvas = document.getElementById('arBabylonCanvas');
-    if (arCanvas && typeof ARCourseEngine !== 'undefined') {
-      window.arCourseEngine = new ARCourseEngine(arCanvas);
-    }
-
-    // AR Mode Toggle Button
-    const arBtn = document.getElementById('btn-toggle-ar');
-    const arLabel = document.getElementById('ar-toggle-label');
-    const arBadge = document.getElementById('ar-tracking-badge');
-    const arPill = document.getElementById('ar-active-pill');
-
-    arBtn?.addEventListener('click', () => {
-      this.isArEnabled = !this.isArEnabled;
-      arBtn.classList.toggle('active', this.isArEnabled);
-      if (arLabel) arLabel.textContent = this.isArEnabled ? 'ON' : 'OFF';
-      if (arPill) {
-        arPill.textContent = this.isArEnabled ? 'Active (Live 3D)' : 'Disabled';
-        arPill.style.color = this.isArEnabled ? '#34d399' : 'var(--text-dim)';
-      }
-      if (arBadge) {
-        arBadge.style.display = this.isArEnabled ? 'inline-flex' : 'none';
-      }
-      if (window.arCourseEngine) {
-        window.arCourseEngine.setArActive(this.isArEnabled);
-        if (window.app) {
-          window.arCourseEngine.updateCourse(window.app.field, window.app.canvasEngine?.obstacles, window.app.pathModel);
-        }
-      }
-    });
-
-    // AR Ground Opacity Slider
-    const arGroundSlider = document.getElementById('slider-ar-ground-opacity');
-    const arGroundVal = document.getElementById('val-ar-ground-opacity');
-    arGroundSlider?.addEventListener('input', (e) => {
-      const val = parseFloat(e.target.value);
-      if (arGroundVal) {
-        arGroundVal.textContent = val === 0 ? '0% (Grass)' : `${Math.round(val * 100)}% Turf`;
-      }
-      if (window.arCourseEngine) {
-        window.arCourseEngine.setGroundOpacity(val);
-      }
-    });
-
-    // AR Marker Physical Size Input
-    const markerSizeInput = document.getElementById('input-ar-marker-size');
-    markerSizeInput?.addEventListener('input', (e) => {
-      const cm = parseFloat(e.target.value) || 20;
-      if (window.arCourseEngine) {
-        window.arCourseEngine.setMarkerSize(cm / 100);
-      }
-    });
-
-    // AR Trajectory & Number Toggles
-    const arTrajBtn = document.getElementById('btn-toggle-ar-traj');
-    arTrajBtn?.addEventListener('click', () => {
-      if (!window.arCourseEngine) return;
-      window.arCourseEngine.showTrajectory = !window.arCourseEngine.showTrajectory;
-      arTrajBtn.classList.toggle('active', window.arCourseEngine.showTrajectory);
-      if (window.app) {
-        window.arCourseEngine.updateCourse(window.app.field, window.app.canvasEngine?.obstacles, window.app.pathModel);
-      }
-    });
-
-    const arNumsBtn = document.getElementById('btn-toggle-ar-nums');
-    arNumsBtn?.addEventListener('click', () => {
-      if (!window.arCourseEngine) return;
-      window.arCourseEngine.showObstacleNumbers = !window.arCourseEngine.showObstacleNumbers;
-      arNumsBtn.classList.toggle('active', window.arCourseEngine.showObstacleNumbers);
-      if (window.app) {
-        window.arCourseEngine.updateCourse(window.app.field, window.app.canvasEngine?.obstacles, window.app.pathModel);
-      }
-    });
-
     this.initCameraDevices();
 
     // If OpenCV initialized before ArUcoTrackerUI was mounted, update status immediately
     if (window._arucoDetectorInitialized || (typeof cv !== 'undefined' && cv.Mat)) {
       this.onOpenCvInitialized();
     }
+  }
+
+  _cacheStaticDom() {
+    this._dom = {
+      statusBadge: document.getElementById('aruco-status-badge'),
+      placeholder: document.getElementById('aruco-camera-placeholder'),
+      startBtn: document.getElementById('startBtn'),
+      stopBtn: document.getElementById('stopBtn'),
+      fpsVal: document.getElementById('aruco-fps-val'),
+      arStatusText: document.getElementById('aruco-ar-status-text'),
+      acquiredCount: document.getElementById('aruco-acquired-count'),
+      liveCountChip: document.getElementById('aruco-live-count-chip'),
+      cornerCountChip: document.getElementById('aruco-corner-count-chip'),
+      midCountChip: document.getElementById('aruco-mid-count-chip'),
+      progressBar: document.getElementById('aruco-progress-bar'),
+      mobileBadgeText: document.getElementById('aruco-mobile-badge-text')
+    };
   }
 
   async initCameraDevices() {
@@ -241,14 +200,21 @@ class ArUcoTrackerUI {
 
   async flipCamera() {
     const select = document.getElementById('aruco-camera-select');
-    // If currently environment or back camera, switch to front; else switch to back
+    const selectedOpt = select && select.selectedIndex >= 0 ? select.options[select.selectedIndex] : null;
+    const label = selectedOpt ? selectedOpt.textContent : '';
+
     if (this.currentCamera === 'environment') {
       this.currentCamera = 'user';
     } else if (this.currentCamera === 'user') {
       this.currentCamera = 'environment';
+    } else if (/front|user|facetime/i.test(label) || this._lastFacingMode === 'user') {
+      this.currentCamera = 'environment';
+    } else if (/back|rear|environment/i.test(label) || this._lastFacingMode === 'environment') {
+      this.currentCamera = 'user';
     } else {
-      this.currentCamera = (this.currentCamera.includes('front') || this.currentCamera === 'user') ? 'environment' : 'user';
+      this.currentCamera = 'user';
     }
+    this._lastFacingMode = this.currentCamera === 'user' ? 'user' : 'environment';
 
     if (select) {
       select.value = this.currentCamera;
@@ -266,6 +232,9 @@ class ArUcoTrackerUI {
     } else {
       const select = document.getElementById('aruco-camera-select');
       this.currentCamera = (select && select.value) ? select.value : 'environment';
+    }
+    if (this.currentCamera === 'user' || this.currentCamera === 'environment') {
+      this._lastFacingMode = this.currentCamera;
     }
 
     // Stop existing stream if currently running
@@ -301,29 +270,39 @@ class ArUcoTrackerUI {
       };
     }
 
-    try {
-      await detector.start({ video: videoConstraint });
+    const finalizeStart = async () => {
+      if (!detector.isRunning) {
+        this.onCameraStopped();
+        return;
+      }
       this.onCameraStarted();
       // Re-enumerate to get full camera labels on iOS now that permission is active
       await this.refreshCameraDevices();
+    };
+
+    try {
+      await detector.start({ video: videoConstraint });
+      await finalizeStart();
     } catch (err) {
       console.warn('Failed with primary video constraints, trying fallback facingMode:', err);
       try {
-        const fallbackFacing = this.currentCamera === 'user' ? 'user' : 'environment';
+        const fallbackFacing = this._lastFacingMode || (this.currentCamera === 'user' ? 'user' : 'environment');
         await detector.start({
           video: {
             facingMode: fallbackFacing
           }
         });
-        this.onCameraStarted();
-        await this.refreshCameraDevices();
+        await finalizeStart();
       } catch (fallbackErr) {
         console.warn('Fallback facingMode failed, trying generic video constraint:', fallbackErr);
         try {
           await detector.start({ video: true });
-          this.onCameraStarted();
-          await this.refreshCameraDevices();
+          await finalizeStart();
         } catch (finalErr) {
+          this.onCameraStopped();
+          if (window.agilityApp && typeof window.agilityApp.onArStopped === 'function') {
+            window.agilityApp.onArStopped();
+          }
           alert('Could not start camera: ' + (finalErr.message || finalErr));
         }
       }
@@ -336,45 +315,45 @@ class ArUcoTrackerUI {
 
   onOpenCvInitialized() {
     this.isOpenCvReady = true;
-    const statusBadge = document.getElementById('aruco-status-badge');
+    const statusBadge = this._dom.statusBadge || document.getElementById('aruco-status-badge');
     if (statusBadge) {
       statusBadge.className = 'aruco-status-badge ready';
       statusBadge.innerHTML = '<span class="aruco-status-dot"></span> OpenCV Ready';
     }
-    const startBtn = document.getElementById('startBtn');
+    const startBtn = this._dom.startBtn || document.getElementById('startBtn');
     if (startBtn) startBtn.disabled = false;
   }
 
   onCameraStarted() {
     this.isStreaming = true;
-    const statusBadge = document.getElementById('aruco-status-badge');
+    const statusBadge = this._dom.statusBadge || document.getElementById('aruco-status-badge');
     if (statusBadge) {
       statusBadge.className = 'aruco-status-badge streaming';
       statusBadge.innerHTML = '<span class="aruco-status-dot"></span> Live Streaming';
     }
 
-    const placeholder = document.getElementById('aruco-camera-placeholder');
+    const placeholder = this._dom.placeholder || document.getElementById('aruco-camera-placeholder');
     if (placeholder) placeholder.classList.add('hidden');
 
-    const startBtn = document.getElementById('startBtn');
-    const stopBtn = document.getElementById('stopBtn');
+    const startBtn = this._dom.startBtn || document.getElementById('startBtn');
+    const stopBtn = this._dom.stopBtn || document.getElementById('stopBtn');
     if (startBtn) startBtn.disabled = true;
     if (stopBtn) stopBtn.disabled = false;
   }
 
   onCameraStopped() {
     this.isStreaming = false;
-    const statusBadge = document.getElementById('aruco-status-badge');
+    const statusBadge = this._dom.statusBadge || document.getElementById('aruco-status-badge');
     if (statusBadge) {
       statusBadge.className = 'aruco-status-badge ready';
       statusBadge.innerHTML = '<span class="aruco-status-dot"></span> Camera Stopped';
     }
 
-    const placeholder = document.getElementById('aruco-camera-placeholder');
+    const placeholder = this._dom.placeholder || document.getElementById('aruco-camera-placeholder');
     if (placeholder) placeholder.classList.remove('hidden');
 
-    const startBtn = document.getElementById('startBtn');
-    const stopBtn = document.getElementById('stopBtn');
+    const startBtn = this._dom.startBtn || document.getElementById('startBtn');
+    const stopBtn = this._dom.stopBtn || document.getElementById('stopBtn');
     if (startBtn) startBtn.disabled = false;
     if (stopBtn) stopBtn.disabled = true;
   }
@@ -385,18 +364,25 @@ class ArUcoTrackerUI {
   handleDetections(markers) {
     const now = Date.now();
 
-    // Map each detected marker ID to our field definitions
-    markers.forEach(m => {
-      // Find matching definition
-      const def = this.markerDefinitions.find(d => this.idMapping[d.key] === m.id);
-      if (def) {
-        const state = this.markerStates[def.key];
+    // Map each detected marker ID to our field definitions in O(1)
+    for (let i = 0; i < markers.length; i++) {
+      const m = markers[i];
+      const key = this._idToKeyMap[m.id];
+      if (key) {
+        const state = this.markerStates[key];
         state.status = 'live';
         state.lastSeenTime = now;
-        state.lastCenter = { x: Math.round(m.center.x), y: Math.round(m.center.y) };
+        const cx = Math.round(m.center.x);
+        const cy = Math.round(m.center.y);
+        if (state.lastCenter) {
+          state.lastCenter.x = cx;
+          state.lastCenter.y = cy;
+        } else {
+          state.lastCenter = { x: cx, y: cy };
+        }
         state.lastCorners = m.corners;
       }
-    });
+    }
 
     // FPS calculation
     this.fpsCounter++;
@@ -404,13 +390,8 @@ class ArUcoTrackerUI {
       this.currentFps = this.fpsCounter;
       this.fpsCounter = 0;
       this.fpsLastTime = now;
-      const fpsEl = document.getElementById('aruco-fps-val');
+      const fpsEl = this._dom.fpsVal || document.getElementById('aruco-fps-val');
       if (fpsEl) fpsEl.textContent = `${this.currentFps} FPS`;
-    }
-
-    // AR 6-DoF Pose Tracking Update
-    if (this.isArEnabled && window.arCourseEngine) {
-      window.arCourseEngine.updatePose(markers, this.idMapping);
     }
 
     this.updateUI();
@@ -422,14 +403,14 @@ class ArUcoTrackerUI {
   tick() {
     const now = Date.now();
 
-    this.markerDefinitions.forEach(m => {
-      const state = this.markerStates[m.key];
+    for (let i = 0; i < this.markerDefinitions.length; i++) {
+      const state = this.markerStates[this.markerDefinitions[i].key];
       if (state.status === 'live') {
         if (!state.lastSeenTime || (now - state.lastSeenTime > 900)) {
           state.status = 'seen';
         }
       }
-    });
+    }
 
     this.updateUI();
   }
@@ -446,7 +427,8 @@ class ArUcoTrackerUI {
     let cornerAcquired = 0;
     let midAcquired = 0;
 
-    this.markerDefinitions.forEach(m => {
+    for (let i = 0; i < this.markerDefinitions.length; i++) {
+      const m = this.markerDefinitions[i];
       const state = this.markerStates[m.key];
       if (state.status === 'live') liveCount++;
       if (state.status === 'live' || state.status === 'seen') {
@@ -454,28 +436,42 @@ class ArUcoTrackerUI {
         if (m.role === 'corner') cornerAcquired++;
         if (m.role === 'midpoint') midAcquired++;
       }
-    });
+    }
 
     const totalCount = this.markerDefinitions.length;
-    const pct = Math.round((seenCount / totalCount) * 100);
+    const prev = this._metricsPrev;
+    const dom = this._dom;
 
-    const valEl = document.getElementById('aruco-acquired-count');
-    if (valEl) valEl.innerHTML = `<span>${seenCount}</span> / ${totalCount}`;
+    if (prev.seenCount !== seenCount) {
+      prev.seenCount = seenCount;
+      const pct = Math.round((seenCount / totalCount) * 100);
+      const valEl = dom.acquiredCount || document.getElementById('aruco-acquired-count');
+      if (valEl) valEl.innerHTML = `<span>${seenCount}</span> / ${totalCount}`;
 
-    const subEl = document.getElementById('aruco-live-count-chip');
-    if (subEl) subEl.textContent = `${liveCount} Live`;
+      const barEl = dom.progressBar || document.getElementById('aruco-progress-bar');
+      if (barEl) barEl.style.width = `${pct}%`;
 
-    const cornerEl = document.getElementById('aruco-corner-count-chip');
-    if (cornerEl) cornerEl.textContent = `${cornerAcquired} / 4`;
+      const mobileBadgeEl = dom.mobileBadgeText || document.getElementById('aruco-mobile-badge-text');
+      if (mobileBadgeEl) mobileBadgeEl.textContent = `Markers (${seenCount}/${totalCount})`;
+    }
 
-    const midEl = document.getElementById('aruco-mid-count-chip');
-    if (midEl) midEl.textContent = `${midAcquired} / 4`;
+    if (prev.liveCount !== liveCount) {
+      prev.liveCount = liveCount;
+      const subEl = dom.liveCountChip || document.getElementById('aruco-live-count-chip');
+      if (subEl) subEl.textContent = `${liveCount} Live`;
+    }
 
-    const barEl = document.getElementById('aruco-progress-bar');
-    if (barEl) barEl.style.width = `${pct}%`;
+    if (prev.cornerAcquired !== cornerAcquired) {
+      prev.cornerAcquired = cornerAcquired;
+      const cornerEl = dom.cornerCountChip || document.getElementById('aruco-corner-count-chip');
+      if (cornerEl) cornerEl.textContent = `${cornerAcquired} / 4`;
+    }
 
-    const mobileBadgeEl = document.getElementById('aruco-mobile-badge-text');
-    if (mobileBadgeEl) mobileBadgeEl.textContent = `Markers (${seenCount}/${totalCount})`;
+    if (prev.midAcquired !== midAcquired) {
+      prev.midAcquired = midAcquired;
+      const midEl = dom.midCountChip || document.getElementById('aruco-mid-count-chip');
+      if (midEl) midEl.textContent = `${midAcquired} / 4`;
+    }
   }
 
   renderMarkerCards() {
@@ -483,6 +479,9 @@ class ArUcoTrackerUI {
     if (!container) return;
 
     container.innerHTML = '';
+    this._cardRefs = {};
+    this._cardPrev = {};
+
     this.markerDefinitions.forEach(m => {
       const card = document.createElement('div');
       card.id = `aruco-card-${m.key}`;
@@ -504,41 +503,91 @@ class ArUcoTrackerUI {
         </div>
       `;
       container.appendChild(card);
+      this._cardRefs[m.key] = {
+        card,
+        badge: card.querySelector(`#aruco-badge-${m.key}`),
+        coord: card.querySelector(`#aruco-coord-${m.key}`),
+        time: card.querySelector(`#aruco-time-${m.key}`)
+      };
     });
   }
 
   updateMarkerCards() {
     const now = Date.now();
 
-    this.markerDefinitions.forEach(m => {
-      const state = this.markerStates[m.key];
-      const card = document.getElementById(`aruco-card-${m.key}`);
-      const badge = document.getElementById(`aruco-badge-${m.key}`);
-      const coord = document.getElementById(`aruco-coord-${m.key}`);
-      const time = document.getElementById(`aruco-time-${m.key}`);
+    for (let i = 0; i < this.markerDefinitions.length; i++) {
+      const key = this.markerDefinitions[i].key;
+      const state = this.markerStates[key];
+      const refs = this._cardRefs[key];
+      if (!refs) continue;
 
-      if (!card || !badge || !coord || !time) return;
-
-      card.className = `aruco-marker-card state-${state.status}`;
+      const cx = state.lastCenter ? state.lastCenter.x : undefined;
+      const cy = state.lastCenter ? state.lastCenter.y : undefined;
+      let prev = this._cardPrev[key];
 
       if (state.status === 'live') {
-        badge.className = 'aruco-badge badge-live';
-        badge.textContent = 'LIVE';
-        coord.textContent = `X:${state.lastCenter?.x} Y:${state.lastCenter?.y}`;
-        time.textContent = 'In Frame';
+        if (prev && prev.status === 'live' && prev.cx === cx && prev.cy === cy) continue;
+        if (!prev) prev = this._cardPrev[key] = {};
+        if (prev.status !== 'live') {
+          refs.card.className = 'aruco-marker-card state-live';
+          refs.badge.className = 'aruco-badge badge-live';
+          refs.badge.textContent = 'LIVE';
+          refs.time.textContent = 'In Frame';
+          prev.timeText = 'In Frame';
+        }
+        if (prev.status === 'unseen' || prev.cx !== cx || prev.cy !== cy || !prev.status) {
+          refs.coord.textContent = `X:${cx} Y:${cy}`;
+        }
+        prev.status = 'live';
+        prev.cx = cx;
+        prev.cy = cy;
+        prev.lastSeenTime = state.lastSeenTime;
+        prev.elapsedSec = null;
       } else if (state.status === 'seen') {
-        badge.className = 'aruco-badge badge-seen';
         const elapsedSec = Math.max(1, Math.round((now - state.lastSeenTime) / 1000));
-        badge.textContent = 'SEEN';
-        coord.textContent = `X:${state.lastCenter?.x} Y:${state.lastCenter?.y}`;
-        time.textContent = elapsedSec < 60 ? `${elapsedSec}s ago` : new Date(state.lastSeenTime).toLocaleTimeString();
+        if (
+          prev && prev.status === 'seen' &&
+          prev.cx === cx && prev.cy === cy &&
+          prev.lastSeenTime === state.lastSeenTime &&
+          (prev.elapsedSec === elapsedSec || (prev.elapsedSec >= 60 && elapsedSec >= 60))
+        ) {
+          continue;
+        }
+        if (!prev) prev = this._cardPrev[key] = {};
+        if (prev.status !== 'seen') {
+          refs.card.className = 'aruco-marker-card state-seen';
+          refs.badge.className = 'aruco-badge badge-seen';
+          refs.badge.textContent = 'SEEN';
+        }
+        if (prev.status === 'unseen' || prev.cx !== cx || prev.cy !== cy || !prev.status) {
+          refs.coord.textContent = `X:${cx} Y:${cy}`;
+        }
+        const timeText = elapsedSec < 60 ? `${elapsedSec}s ago` : new Date(state.lastSeenTime).toLocaleTimeString();
+        if (prev.timeText !== timeText) {
+          refs.time.textContent = timeText;
+          prev.timeText = timeText;
+        }
+        prev.status = 'seen';
+        prev.cx = cx;
+        prev.cy = cy;
+        prev.lastSeenTime = state.lastSeenTime;
+        prev.elapsedSec = elapsedSec;
       } else {
-        badge.className = 'aruco-badge badge-unseen';
-        badge.textContent = 'Not Detected';
-        coord.textContent = '-- , --';
-        time.textContent = 'Never';
+        if (prev && prev.status === 'unseen') continue;
+        if (!prev) prev = this._cardPrev[key] = {};
+        refs.card.className = 'aruco-marker-card state-unseen';
+        refs.badge.className = 'aruco-badge badge-unseen';
+        refs.badge.textContent = 'Not Detected';
+        refs.coord.textContent = '-- , --';
+        refs.time.textContent = 'Never';
+        prev.status = 'unseen';
+        prev.cx = undefined;
+        prev.cy = undefined;
+        prev.lastSeenTime = null;
+        prev.elapsedSec = null;
+        prev.timeText = 'Never';
       }
-    });
+    }
   }
 
   renderFieldSvg() {
@@ -568,11 +617,17 @@ class ArUcoTrackerUI {
       ${nodesHtml}
     `;
 
-    // Click handler to highlight card
-    svg.querySelectorAll('.field-map-node').forEach(node => {
+    this._svgNodes = {};
+    this._svgPrev = {};
+
+    // Cache SVG nodes and wire click handler to highlight card
+    this.markerDefinitions.forEach(m => {
+      const node = svg.querySelector(`#svg-node-${m.key}`);
+      if (!node) return;
+      this._svgNodes[m.key] = node;
+      this._svgPrev[m.key] = 'unseen';
       node.addEventListener('click', () => {
-        const key = node.getAttribute('data-key');
-        const card = document.getElementById(`aruco-card-${key}`);
+        const card = (this._cardRefs[m.key] && this._cardRefs[m.key].card) || document.getElementById(`aruco-card-${m.key}`);
         if (card) {
           card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
           card.style.transform = 'scale(1.03)';
@@ -583,13 +638,16 @@ class ArUcoTrackerUI {
   }
 
   updateFieldSvg() {
-    this.markerDefinitions.forEach(m => {
-      const state = this.markerStates[m.key];
-      const node = document.getElementById(`svg-node-${m.key}`);
+    for (let i = 0; i < this.markerDefinitions.length; i++) {
+      const key = this.markerDefinitions[i].key;
+      const status = this.markerStates[key].status;
+      if (this._svgPrev[key] === status) continue;
+      this._svgPrev[key] = status;
+      const node = this._svgNodes[key];
       if (node) {
-        node.className.baseVal = `field-map-node state-${state.status}`;
+        node.className.baseVal = `field-map-node state-${status}`;
       }
-    });
+    }
   }
 
   exportMarkerData() {
@@ -625,6 +683,11 @@ class ArUcoTrackerUI {
     if (statusEl) {
       statusEl.textContent = text;
     }
+  }
+
+  hideSettingsModal() {
+    document.getElementById('aruco-settings-modal')?.classList.remove('active');
+    document.getElementById('aruco-backdrop')?.classList.remove('active');
   }
 
   showSettingsModal() {
@@ -677,11 +740,14 @@ class ArUcoTrackerUI {
           <label style="font-size: 13px; color: var(--text-main); font-weight: 500;">
             ${m.name} <span style="font-size: 11px; color: var(--text-dim);">(${m.type})</span>
           </label>
-          <input type="number" min="0" max="49" class="app-input" id="input-aruco-id-${m.key}" value="${this.idMapping[m.key]}" style="width: 80px; text-align: center;">
+          <input type="number" min="0" max="49" step="1" class="app-input" id="input-aruco-id-${m.key}" value="${this.idMapping[m.key]}" style="width: 80px; text-align: center;">
         `;
         list.appendChild(row);
       });
     }
+
+    let errBanner = document.getElementById('aruco-settings-error');
+    if (errBanner) errBanner.style.display = 'none';
 
     modal.classList.add('active');
     backdrop.classList.add('active');
@@ -689,16 +755,56 @@ class ArUcoTrackerUI {
     const saveBtn = document.getElementById('btn-aruco-save-settings');
     const cancelBtn = document.getElementById('btn-aruco-cancel-settings');
 
-    const closeModal = () => {
-      modal.classList.remove('active');
-      backdrop.classList.remove('active');
-    };
+    const closeModal = () => this.hideSettingsModal();
 
     if (cancelBtn) cancelBtn.onclick = closeModal;
     if (backdrop) backdrop.onclick = closeModal;
 
     if (saveBtn) {
       saveBtn.onclick = () => {
+        // Validate all 8 marker IDs before mutating any state: integers in [0, 49], no duplicates
+        const newIds = {};
+        const seenIds = new Map();
+        const errors = [];
+
+        this.markerDefinitions.forEach(m => {
+          const input = document.getElementById(`input-aruco-id-${m.key}`);
+          if (!input) return;
+          input.style.borderColor = '';
+          const raw = input.value.trim();
+          const num = raw === '' ? NaN : Number(raw);
+          if (!Number.isInteger(num) || num < 0 || num > 49) {
+            input.style.borderColor = '#f43f5e';
+            errors.push(`${m.name}: ID must be an integer between 0 and 49.`);
+            return;
+          }
+          if (seenIds.has(num)) {
+            input.style.borderColor = '#f43f5e';
+            const firstInput = seenIds.get(num).input;
+            if (firstInput) firstInput.style.borderColor = '#f43f5e';
+            errors.push(`Duplicate ID ${num} (${seenIds.get(num).name} and ${m.name}).`);
+            return;
+          }
+          seenIds.set(num, { name: m.name, input });
+          newIds[m.key] = num;
+        });
+
+        if (errors.length > 0) {
+          if (!errBanner && list && list.parentElement) {
+            errBanner = document.createElement('div');
+            errBanner.id = 'aruco-settings-error';
+            errBanner.style.cssText = 'margin-top: 10px; padding: 8px 10px; border-radius: 6px; background: rgba(244,63,94,0.14); border: 1px solid rgba(244,63,94,0.5); color: #fda4af; font-size: 12px; line-height: 1.4;';
+            list.parentElement.appendChild(errBanner);
+          }
+          if (errBanner) {
+            errBanner.textContent = errors[0];
+            errBanner.style.display = 'block';
+          }
+          return;
+        }
+
+        if (errBanner) errBanner.style.display = 'none';
+
         // Save physical marker size
         const sizeInput = document.getElementById('input-aruco-marker-size');
         if (sizeInput) {
@@ -730,14 +836,14 @@ class ArUcoTrackerUI {
           if (autoInput) window.arucoFieldTracker.setAutoFov(autoInput.checked);
         }
 
-        // Save marker IDs
+        // Apply validated marker IDs and refresh cached lookup map
         this.markerDefinitions.forEach(m => {
-          const input = document.getElementById(`input-aruco-id-${m.key}`);
-          if (input) {
-            this.idMapping[m.key] = parseInt(input.value, 10) || 0;
-            this.markerStates[m.key].id = this.idMapping[m.key];
+          if (Object.prototype.hasOwnProperty.call(newIds, m.key)) {
+            this.idMapping[m.key] = newIds[m.key];
+            this.markerStates[m.key].id = newIds[m.key];
           }
         });
+        this._rebuildIdMap();
         this.renderMarkerCards();
         this.renderFieldSvg();
         this.updateUI();

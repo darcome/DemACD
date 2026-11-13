@@ -811,6 +811,10 @@
   color: var(--accent-emerald);
 }
 
+.aruco-mobile-close-btn {
+  display: none;
+}
+
 /* Settings Modal for ArUco Marker ID Mapping */
 .aruco-settings-modal {
   position: fixed;
@@ -896,6 +900,9 @@
   }
   .aruco-mobile-sidebar-toggle {
     display: inline-flex;
+  }
+  .aruco-mobile-close-btn {
+    display: flex;
   }
   .aruco-camera-viewport {
     flex: 1 1 100%;

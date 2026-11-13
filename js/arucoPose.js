@@ -251,11 +251,12 @@
    * model = { upright, camWeight, camHeight }: marker placement and the optional camera height prior
    * Returns null when a corner falls behind the camera.
    */
-  function residuals(st, obs, f, model) {
+  function residuals(st, obs, f, model, outBuf) {
     const R = st.R, t = st.t, half = st.size / 2;
     const upright = model.upright;
     const fs = st.fs || 1;
-    const out = new Float64Array(obs.length * 8 + (model.camWeight ? 2 : 0));
+    const m = obs.length * 8 + (model.camWeight ? 2 : 0);
+    const out = outBuf || new Float64Array(m);
     for (let k = 0; k < obs.length; k++) {
       const o = obs[k];
       const cs = Math.cos(st.yaws[k]) * half, sn = Math.sin(st.yaws[k]) * half;
@@ -283,6 +284,7 @@
     if (model.camWeight) {
       // Weak pull of the camera height toward the expected one; only matters where the image says little
       out[obs.length * 8] = model.camWeight * (-(R[2] * t[0] + R[5] * t[1] + R[8] * t[2]) - model.camHeight);
+      out[obs.length * 8 + 1] = 0;
     }
     return out;
   }
@@ -299,13 +301,53 @@
       : [c, -s, 0, s, c, 0, 0, 0, 1];
   }
 
-  function robustCost(r) {
+  function robustCost(r, len) {
+    const m = len !== undefined ? len : r.length;
     let cost = 0;
-    for (let i = 0; i < r.length; i += 2) {
+    for (let i = 0; i < m; i += 2) {
       const e2 = r[i] * r[i] + r[i + 1] * r[i + 1];
       cost += e2 <= HUBER_PX * HUBER_PX ? e2 : 2 * HUBER_PX * Math.sqrt(e2) - HUBER_PX * HUBER_PX;
     }
     return cost;
+  }
+
+  // Reusable LM scratch buffers to avoid per-frame typed/matrix allocations inside refine()
+  const _lmVecScratch = { cap: 0, r: null, rc: null, rp: null, w: null };
+  const _lmDimScratch = [];
+  function _getRefineScratch(m, nP) {
+    if (_lmVecScratch.cap < m) {
+      const cap = Math.max(m, 66);
+      _lmVecScratch.cap = cap;
+      _lmVecScratch.r = new Float64Array(cap);
+      _lmVecScratch.rc = new Float64Array(cap);
+      _lmVecScratch.rp = new Float64Array(cap);
+      _lmVecScratch.w = new Float64Array(cap);
+    }
+    let ds = _lmDimScratch[nP];
+    if (!ds || ds.mCap < m) {
+      const mCap = Math.max(m, ds ? ds.mCap : 66);
+      if (!ds) {
+        const Hm = [], Ad = [];
+        for (let a = 0; a < nP; a++) {
+          Hm.push(new Array(nP).fill(0));
+          Ad.push(new Array(nP).fill(0));
+        }
+        ds = _lmDimScratch[nP] = {
+          mCap,
+          d: new Array(nP).fill(0),
+          g: new Array(nP).fill(0),
+          Hm,
+          Ad,
+          J: []
+        };
+      } else {
+        ds.mCap = mCap;
+      }
+      for (let p = 0; p < nP; p++) {
+        ds.J[p] = new Float64Array(mCap);
+      }
+    }
+    return { vec: _lmVecScratch, dim: ds };
   }
 
   /**
@@ -317,72 +359,80 @@
     const n = obs.length;
     const iF = 6 + (freeExtras ? n + 1 : 0);
     const nP = iF + (model.freeFocal ? 1 : 0);
+    const m = n * 8 + (model.camWeight ? 2 : 0);
+    const { vec, dim } = _getRefineScratch(m, nP);
+    let r = vec.r, rc = vec.rc;
+    const rp = vec.rp, w = vec.w;
+    const { d, g, Hm, Ad, J } = dim;
 
-    const apply = (st, d) => ({
-      R: orthonormalize(mul(expSO3([d[0], d[1], d[2]]), st.R)),
-      t: [st.t[0] + d[3], st.t[1] + d[4], st.t[2] + d[5]],
-      yaws: freeExtras ? st.yaws.map((y, i) => y + d[6 + i]) : st.yaws,
-      size: freeExtras ? st.size * Math.exp(d[6 + n]) : st.size,
-      fs: model.freeFocal ? st.fs * Math.exp(d[iF]) : st.fs
+    const apply = (st, step) => ({
+      R: orthonormalize(mul(expSO3([step[0], step[1], step[2]]), st.R)),
+      t: [st.t[0] + step[3], st.t[1] + step[4], st.t[2] + step[5]],
+      yaws: freeExtras ? st.yaws.map((y, i) => y + step[6 + i]) : st.yaws,
+      size: freeExtras ? st.size * Math.exp(step[6 + n]) : st.size,
+      fs: model.freeFocal ? st.fs * Math.exp(step[iF]) : st.fs
     });
 
     let st = { R: start.R, t: start.t, yaws: start.yaws, size: start.size, fs: start.fs || 1 };
-    let r = residuals(st, obs, f, model);
-    if (!r) return null;
-    let cost = robustCost(r);
+    if (!residuals(st, obs, f, model, r)) return null;
+    let cost = robustCost(r, m);
     let lambda = 1e-3;
     const EPS = 1e-6;
-    const m = r.length;
 
     for (let iter = 0; iter < (maxIter || 12); iter++) {
       // Numeric Jacobian (at most 15 parameters, so this stays cheap)
-      const J = [];
       let ok = true;
+      d.fill(0);
       for (let p = 0; p < nP && ok; p++) {
-        const d = new Array(nP).fill(0);
         d[p] = EPS;
-        const rp = residuals(apply(st, d), obs, f, model);
-        if (!rp) { ok = false; break; }
-        const col = new Float64Array(m);
+        const rpOk = residuals(apply(st, d), obs, f, model, rp);
+        d[p] = 0;
+        if (!rpOk) { ok = false; break; }
+        const col = J[p];
         for (let i = 0; i < m; i++) col[i] = (rp[i] - r[i]) / EPS;
-        J.push(col);
       }
       if (!ok) break;
 
       // Huber weights per corner
-      const w = new Float64Array(m);
       for (let i = 0; i < m; i += 2) {
         const e = Math.hypot(r[i], r[i + 1]);
         w[i] = w[i + 1] = e > HUBER_PX ? HUBER_PX / e : 1;
       }
 
-      const Hm = [], g = [];
       for (let a = 0; a < nP; a++) {
-        Hm.push(new Array(nP).fill(0));
+        const colA = J[a];
         let ga = 0;
-        for (let i = 0; i < m; i++) ga += w[i] * J[a][i] * r[i];
-        g.push(-ga);
+        for (let i = 0; i < m; i++) ga += w[i] * colA[i] * r[i];
+        g[a] = -ga;
       }
       for (let a = 0; a < nP; a++) {
+        const colA = J[a];
         for (let c = a; c < nP; c++) {
+          const colC = J[c];
           let s = 0;
-          for (let i = 0; i < m; i++) s += w[i] * J[a][i] * J[c][i];
+          for (let i = 0; i < m; i++) s += w[i] * colA[i] * colC[i];
           Hm[a][c] = Hm[c][a] = s;
         }
       }
 
       let accepted = false, gain = 0;
       for (let attempt = 0; attempt < 8; attempt++) {
-        const Ad = Hm.map((row, i) => row.map((v, j) => (i === j ? v * (1 + lambda) + 1e-12 : v)));
+        for (let i = 0; i < nP; i++) {
+          const hRow = Hm[i], aRow = Ad[i];
+          for (let j = 0; j < nP; j++) {
+            aRow[j] = i === j ? hRow[j] * (1 + lambda) + 1e-12 : hRow[j];
+          }
+        }
         const delta = solveLinear(Ad, g);
         if (delta) {
           const cand = apply(st, delta);
-          const rc = residuals(cand, obs, f, model);
-          if (rc) {
-            const cc = robustCost(rc);
+          if (residuals(cand, obs, f, model, rc)) {
+            const cc = robustCost(rc, m);
             if (cc < cost) {
               gain = cost - cc;
-              st = cand; r = rc; cost = cc;
+              st = cand;
+              const tmp = r; r = rc; rc = tmp;
+              cost = cc;
               lambda = Math.max(lambda / 3, 1e-9);
               accepted = true;
               break;
@@ -602,7 +652,21 @@
       const K = this.intrinsics(frame.width, frame.height);
       const obs = this._buildObservations(frame, K);
       this._frameMaxDim = Math.max(frame.width, frame.height);
-      if (this.autoFov) this._calibrate(obs, frame);
+
+      const locked = this.isLocked && !!this.pose;
+      if (!locked) {
+        const W = (frame.field && frame.field.widthMeters) || 40;
+        const L = (frame.field && frame.field.lengthMeters) || 20;
+        const fieldKey = `${W}x${L}`;
+        if (this.cal.aspectFor && this.cal.aspectFor !== fieldKey) {
+          this.cal.aspect = [];
+          this.cal.measuredAspect = null;
+          this.cal.focalFit = [];
+          if (this.cal.focal.length < 20) this.cal.focalRatio = null;
+        }
+        this.cal.aspectFor = fieldKey;
+        if (this.autoFov) this._calibrate(obs, frame);
+      }
 
       // 1. Predict: carry the pose along with the rotation reported by the orientation sensor
       const G = this._gyroDelta(frame.deviceRotation || null);
@@ -614,7 +678,7 @@
         }
       }
 
-      if (this.isLocked && this.pose) {
+      if (locked) {
         return this._result('locked', obs.length, K);
       }
 
@@ -784,7 +848,13 @@
       const q2 = h[1] * h[1] + h[4] * h[4] + fn * fn * h[7] * h[7];
       if (q1 > 0 && q2 > 0) {
         const key = `${W}x${L}`;
-        if (cal.aspectFor !== key) { cal.aspectFor = key; cal.aspect = []; cal.measuredAspect = null; }
+        if (cal.aspectFor !== key) {
+          cal.aspectFor = key;
+          cal.aspect = [];
+          cal.measuredAspect = null;
+          cal.focalFit = [];
+          if (cal.focal.length < 20) cal.focalRatio = null;
+        }
         cal.aspect.push(Math.sqrt(q1 / q2) * W / L);
         if (cal.aspect.length > 60) cal.aspect.shift();
         if (cal.aspect.length >= 10) cal.measuredAspect = median(cal.aspect);
