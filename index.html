@@ -12,9 +12,8 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha512-iecdLmaskl7CVkqkXNQ/ZH/XLlvWZOJyj7Yy7tcenmpD1ypASozpmT/E0iPtmFIB46ZmdtAc9eNBvH0H/ZpiBw==" crossorigin="anonymous" referrerpolicy="no-referrer" />
   
-  <!-- Babylon.js 3D Engine & Serializer CDN -->
+  <!-- Babylon.js 3D Engine CDN -->
   <script src="https://cdn.babylonjs.com/babylon.js"></script>
-  <script src="https://cdn.babylonjs.com/serializers/babylonjs.serializers.min.js"></script>
 
   <!-- App Stylesheets -->
   <link rel="stylesheet" href="css/main.css">
@@ -23,19 +22,15 @@
   <link rel="stylesheet" href="css/aruco.css">
 
   <script>
-    // Optimize 2D contexts for repeated pixel readbacks
+    // Optimize the ArUco detector canvas 2D context for repeated pixel readbacks
     const originalGetContext = HTMLCanvasElement.prototype.getContext;
 
-	HTMLCanvasElement.prototype.getContext = function (type, attributes) {
-	  // Only apply to OpenCV internal canvases (which have no ID) or the specific detector canvas
-	  if (type === '2d') {
-		const isDetectorCanvas = this.id === 'outputCanvas' || !this.id;
-		if (isDetectorCanvas) {
-		  attributes = Object.assign({}, attributes, { willReadFrequently: true });
-		}
-	  }
-	  return originalGetContext.call(this, type, attributes);
-	};
+    HTMLCanvasElement.prototype.getContext = function (type, attributes) {
+      if (type === '2d' && this.id === 'outputCanvas') {
+        attributes = Object.assign({}, attributes, { willReadFrequently: true });
+      }
+      return originalGetContext.call(this, type, attributes);
+    };
 
     // Pre-declare onCvLoaded to prevent ReferenceError if opencv.js finishes before body scripts
     window.onCvLoaded = function() {

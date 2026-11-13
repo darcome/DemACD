@@ -3,8 +3,6 @@
   Theme: Modern Dark Turf & Slate with Glassmorphism and Vibrant Agility Accents
 */
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap');
-
 :root {
   --bg-dark: #090d16;
   --panel-bg: rgba(15, 23, 42, 0.85);
