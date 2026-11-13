@@ -283,10 +283,34 @@
       this.redoStack = [];
       this.maxSize = maxSize;
       this.onChangeCallback = null;
+      this._bgCache = new Map();
+      this._bgRevCache = new Map();
+      this._bgCounter = 1;
     }
     setOnChange(cb) { this.onChangeCallback = cb; }
+    _dehydrate(state) {
+      if (state && state.field && typeof state.field.bgImageDataUrl === 'string' && state.field.bgImageDataUrl.length > 256) {
+        const url = state.field.bgImageDataUrl;
+        let refId = this._bgRevCache.get(url);
+        if (!refId) {
+          refId = `__bg_ref_${this._bgCounter++}`;
+          this._bgRevCache.set(url, refId);
+          this._bgCache.set(refId, url);
+        }
+        return { ...state, field: { ...state.field, bgImageDataUrl: refId } };
+      }
+      return state;
+    }
+    _rehydrate(serialized) {
+      const state = JSON.parse(serialized);
+      const refId = state && state.field && state.field.bgImageDataUrl;
+      if (typeof refId === 'string' && refId.startsWith('__bg_ref_')) {
+        state.field.bgImageDataUrl = this._bgCache.get(refId) || null;
+      }
+      return state;
+    }
     push(state) {
-      const serialized = JSON.stringify(state);
+      const serialized = JSON.stringify(this._dehydrate(state));
       if (this.undoStack.length > 0 && this.undoStack[this.undoStack.length - 1] === serialized) return;
       this.undoStack.push(serialized);
       if (this.undoStack.length > this.maxSize) this.undoStack.shift();
@@ -295,23 +319,25 @@
     }
     undo(currentState) {
       if (!this.canUndo()) return null;
-      this.redoStack.push(JSON.stringify(currentState));
+      this.redoStack.push(JSON.stringify(this._dehydrate(currentState)));
       const prev = this.undoStack.pop();
       this._notify();
-      return JSON.parse(prev);
+      return this._rehydrate(prev);
     }
     redo(currentState) {
       if (!this.canRedo()) return null;
-      this.undoStack.push(JSON.stringify(currentState));
+      this.undoStack.push(JSON.stringify(this._dehydrate(currentState)));
       const next = this.redoStack.pop();
       this._notify();
-      return JSON.parse(next);
+      return this._rehydrate(next);
     }
     canUndo() { return this.undoStack.length > 0; }
     canRedo() { return this.redoStack.length > 0; }
     clear() {
       this.undoStack = [];
       this.redoStack = [];
+      this._bgCache.clear();
+      this._bgRevCache.clear();
       this._notify();
     }
     _notify() {
@@ -338,21 +364,33 @@
       this.bgImageOpacity = config.bgImageOpacity !== undefined ? config.bgImageOpacity : 0.6;
       this.showBgImage = config.showBgImage !== undefined ? config.showBgImage : true;
       this.bgImage = null;
+      this._bgLoadToken = 0;
       if (this.bgImageDataUrl) {
         this.setBgImage(this.bgImageDataUrl);
       }
     }
     setBgImage(dataUrl, callback) {
+      const token = ++this._bgLoadToken;
       if (!dataUrl) {
         this.bgImageDataUrl = null;
         this.bgImage = null;
         if (typeof callback === 'function') callback();
         return;
       }
+      if (dataUrl === this.bgImageDataUrl && this.bgImage && this.bgImage.complete && this.bgImage.naturalWidth > 0) {
+        if (typeof callback === 'function') callback();
+        return;
+      }
       this.bgImageDataUrl = dataUrl;
       const img = new Image();
       img.onload = () => {
+        if (token !== this._bgLoadToken) return;
         this.bgImage = img;
+        if (typeof callback === 'function') callback();
+      };
+      img.onerror = () => {
+        if (token !== this._bgLoadToken) return;
+        this.bgImage = null;
         if (typeof callback === 'function') callback();
       };
       img.src = dataUrl;
@@ -613,6 +651,11 @@
       const N1 = this.tunnelNodes[1];
       const N2 = this.tunnelNodes[2];
 
+      const cacheKey = `${samplesCount}:${N0.x},${N0.y}|${N1.x},${N1.y}|${N2.x},${N2.y}`;
+      if (this._tunnelSplineCache && this._tunnelSplineCache.key === cacheKey) {
+        return this._tunnelSplineCache.points;
+      }
+
       const Cx = 2 * N1.x - 0.5 * N0.x - 0.5 * N2.x;
       const Cy = 2 * N1.y - 0.5 * N0.y - 0.5 * N2.y;
 
@@ -651,6 +694,7 @@
           });
         }
       }
+      this._tunnelSplineCache = { key: cacheKey, points: res };
       return res;
     }
 
@@ -924,7 +968,16 @@
     getCourseData(obstacles) {
       const steps = this.getSequencedSteps(obstacles);
       if (steps.length === 0) {
-        return { steps: [], allWaypoints: [], segmentControlNodes: [], segments: [] };
+        return { steps: [], sequencedObstacles: [], allWaypoints: [], segmentControlNodes: [], segments: [] };
+      }
+
+      const sequencedObstacles = [];
+      const seen = new Set();
+      for (const s of steps) {
+        if (!seen.has(s.obstacle.id)) {
+          seen.add(s.obstacle.id);
+          sequencedObstacles.push(s.obstacle);
+        }
       }
 
       const allWaypoints = [];
@@ -955,7 +1008,7 @@
         prevWaypts = nextWaypts;
       }
 
-      return { steps, allWaypoints, segmentControlNodes, segments };
+      return { steps, sequencedObstacles, allWaypoints, segmentControlNodes, segments };
     }
     getAllWaypoints(obstacles) {
       return this.getCourseData(obstacles).allWaypoints;
@@ -1007,8 +1060,7 @@
   class PathRenderer {
     static render(ctx, pathModel, obstacles, field, activeDrag = null) {
       if (!pathModel.showPath && !pathModel.showSequenceNumbers) return;
-      const list = pathModel.getSequencedObstacles(obstacles);
-      const { allWaypoints, segmentControlNodes, segments } = pathModel.getCourseData(obstacles);
+      const { sequencedObstacles: list, allWaypoints, segmentControlNodes, segments } = pathModel.getCourseData(obstacles);
 
       if (allWaypoints.length === 0) return;
 
@@ -1016,10 +1068,8 @@
       if (pathModel.showPath && allWaypoints.length >= 2) {
         ctx.save();
         ctx.strokeStyle = '#38bdf8';
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 2.2;
         ctx.setLineDash([]);
-        ctx.shadowColor = 'rgba(56, 189, 248, 0.4)';
-        ctx.shadowBlur = 6;
 
         ctx.beginPath();
         this._drawCatmullRomSpline(ctx, allWaypoints, field);
@@ -1034,12 +1084,9 @@
           const py = field.toPixels(node.y);
 
           ctx.save();
-          ctx.shadowColor = 'rgba(56, 189, 248, 0.9)';
-          ctx.shadowBlur = 10;
-
           ctx.fillStyle = '#ffffff';
-          ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth = 1;
+          ctx.strokeStyle = '#38bdf8';
+          ctx.lineWidth = 1.5;
 
           ctx.beginPath();
           ctx.arc(px, py, 4, 0, Math.PI * 2);
@@ -1089,11 +1136,9 @@
       const boxX = px - boxW / 2;
       const boxY = py - boxH / 2;
 
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
-      ctx.shadowBlur = 6;
       ctx.fillStyle = '#0f172a';
       ctx.strokeStyle = '#38bdf8';
-      ctx.lineWidth = 1;
+      ctx.lineWidth = 1.2;
 
       ctx.beginPath();
       if (typeof ctx.roundRect === 'function') {
@@ -1109,7 +1154,6 @@
       ctx.fill();
       ctx.stroke();
 
-      ctx.shadowBlur = 0;
       ctx.fillStyle = '#38bdf8';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -1166,8 +1210,6 @@
         ctx.strokeStyle = (isPosModeActive || isThisObsDragged) ? '#f59e0b' : '#38bdf8';
         ctx.lineWidth = (isPosModeActive || isThisObsDragged) ? 1.8 : 1.2;
         ctx.setLineDash([5, 5]);
-        ctx.shadowColor = (isPosModeActive || isThisObsDragged) ? 'rgba(245, 158, 11, 0.4)' : 'rgba(56, 189, 248, 0.3)';
-        ctx.shadowBlur = 6;
 
         ctx.beginPath();
         if (typeof ctx.ellipse === 'function') {
@@ -1197,10 +1239,8 @@
 
         // Render Sequence Badge Circle / Pill
         ctx.fillStyle = '#0f172a';
-        ctx.strokeStyle = isDraggedSeq ? '#f59e0b' : (obs.isSelected ? '#38bdf8' : '#38bdf8');
+        ctx.strokeStyle = isDraggedSeq ? '#f59e0b' : '#38bdf8';
         ctx.lineWidth = isDraggedSeq ? 2.8 : (obs.isSelected ? 2.2 : 1.8);
-        ctx.shadowColor = isDraggedSeq ? 'rgba(245, 158, 11, 0.8)' : 'rgba(0, 0, 0, 0.6)';
-        ctx.shadowBlur = isDraggedSeq ? 8 : 5;
 
         ctx.beginPath();
         if (seqStr.length <= 2) {
@@ -1217,7 +1257,6 @@
         ctx.fill();
         ctx.stroke();
 
-        ctx.shadowBlur = 0;
         ctx.fillStyle = isDraggedSeq ? '#fbbf24' : '#f8fafc';
         ctx.font = 'bold 11px sans-serif';
         ctx.textAlign = 'center';
@@ -1298,9 +1337,7 @@
         ctx.rotate(degToRad(obstacle.rotation));
         ctx.translate(offX, offY);
         ctx.strokeStyle = '#38bdf8';
-        ctx.lineWidth = 3;
-        ctx.shadowColor = 'rgba(56, 189, 248, 0.6)';
-        ctx.shadowBlur = 12;
+        ctx.lineWidth = 2.5;
         ctx.setLineDash([6, 4]);
         ctx.strokeRect(-selW / 2 - 8, -selD / 2 - 8, selW + 16, selD + 16);
         ctx.restore();
@@ -1472,8 +1509,6 @@
           ctx.beginPath();
           ctx.arc(nx, ny, idx === 1 ? 9 : 7.5, 0, Math.PI * 2);
           ctx.fillStyle = idx === 1 ? '#38bdf8' : '#f59e0b';
-          ctx.shadowColor = 'rgba(0, 0, 0, 0.4)';
-          ctx.shadowBlur = 6;
           ctx.fill();
           ctx.lineWidth = 2.5;
           ctx.strokeStyle = '#ffffff';
@@ -1572,8 +1607,8 @@
       ctx.save();
       ctx.translate(wingX, 0);
       ctx.fillStyle = isReverse ? '#ef4444' : '#3b82f6';
-      ctx.shadowColor = 'rgba(0,0,0,0.4)'; ctx.shadowBlur = 6;
       ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#0f172a'; ctx.lineWidth = 1.5; ctx.stroke();
       ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2.5; ctx.beginPath();
       const startAngle = isReverse ? (isLeft ? Math.PI / 4 : (3 * Math.PI) / 4) : (isLeft ? -Math.PI / 4 : (-3 * Math.PI) / 4);
       const endAngle = startAngle + (isLeft ? -Math.PI : Math.PI);
@@ -1637,9 +1672,17 @@
       this.panMouseStart = { x: 0, y: 0 }; this.lastMouse = { x: 0, y: 0 };
       this.isSpacePressed = false;
       this.isTouchPinching = false; this.touchPinchDist = 0; this.touchPinchCenter = { x: 0, y: 0 };
+      this._rafRenderId = null;
 
       this._initEvents();
       this.resizeCanvas();
+    }
+    requestRender() {
+      if (this._rafRenderId !== null) return;
+      this._rafRenderId = requestAnimationFrame(() => {
+        this._rafRenderId = null;
+        this.render();
+      });
     }
     resizeCanvas() {
       const parent = this.canvas.parentElement;
@@ -1746,6 +1789,10 @@
       };
     }
     render() {
+      if (this._rafRenderId !== null) {
+        cancelAnimationFrame(this._rafRenderId);
+        this._rafRenderId = null;
+      }
       const rect = this.canvas.getBoundingClientRect();
       const w = rect.width, h = rect.height;
 
@@ -2013,7 +2060,7 @@
             this.panY = mY - (mY - this.panY) * (newZoom / this.zoom);
             this.zoom = newZoom;
           }
-          this.render();
+          this.requestRender();
         }
 
         this.touchPinchDist = newDist;
@@ -2050,6 +2097,20 @@
         obs.y,
         obs.rotation
       );
+    }
+
+    _findObstacleAt(x, y) {
+      for (let i = this.obstacles.length - 1; i >= 0; i--) {
+        const o = this.obstacles[i];
+        if (o.containsPoint) {
+          if (o.containsPoint(x, y)) return o;
+        } else {
+          const effW = Math.max(o.widthMeters, 1.5);
+          const effD = Math.max(o.depthMeters, 1.5);
+          if (isPointInOrientedRect(x, y, o.x, o.y, effW + 0.4, effD + 0.4, o.rotation)) return o;
+        }
+      }
+      return null;
     }
 
     _onMouseDown(e) {
@@ -2101,11 +2162,7 @@
       }
 
       // 2. OBSTACLE SELECTION & DRAG HAS FIRST PRIORITY!
-      const hitObs = [...this.obstacles].reverse().find(o => {
-        const effW = Math.max(o.widthMeters, 1.5);
-        const effD = Math.max(o.depthMeters, 1.5);
-        return o.containsPoint ? o.containsPoint(pos.x, pos.y) : isPointInOrientedRect(pos.x, pos.y, o.x, o.y, effW + 0.4, effD + 0.4, o.rotation);
-      });
+      const hitObs = this._findObstacleAt(pos.x, pos.y);
 
       if (hitObs) {
         if (!hitObs.isSelected && !e.shiftKey) {
@@ -2179,7 +2236,7 @@
         this.panY += e.clientY - this.lastMouse.y;
         this.lastMouse = { x: e.clientX, y: e.clientY };
         this.canvas.style.cursor = 'grabbing';
-        this.render();
+        this.requestRender();
         return;
       }
 
@@ -2187,7 +2244,7 @@
 
       if (this.mode === 'measure' && this.isMeasuring && this.measureStart) {
         this.measureEnd = pos;
-        this.render();
+        this.requestRender();
         return;
       }
 
@@ -2197,7 +2254,8 @@
         if (typeof this.onObstacleChange === 'function') {
           this.onObstacleChange(this.draggedTunnelObs);
         }
-        this.render();
+        this.canvas.style.cursor = 'grabbing';
+        this.requestRender();
         return;
       }
 
@@ -2211,7 +2269,8 @@
         if (typeof this.onObstacleChange === 'function') {
           this.onObstacleChange(this.draggedBadgeObs);
         }
-        this.render();
+        this.canvas.style.cursor = 'grabbing';
+        this.requestRender();
         return;
       }
 
@@ -2223,7 +2282,8 @@
           this.draggedPathNode.x = this.field.snap(this.draggedPathNode.x);
           this.draggedPathNode.y = this.field.snap(this.draggedPathNode.y);
         }
-        this.render();
+        this.canvas.style.cursor = 'grabbing';
+        this.requestRender();
         return;
       }
 
@@ -2239,7 +2299,8 @@
         if (typeof this.onObstacleChange === 'function') {
           this.onObstacleChange(this.rotatingObs);
         }
-        this.render();
+        this.canvas.style.cursor = 'grabbing';
+        this.requestRender();
         return;
       }
 
@@ -2264,7 +2325,9 @@
         if (typeof this.onObstacleChange === 'function') {
           this.onObstacleChange(this.selectedObstacles[0]);
         }
-        this.render();
+        this.canvas.style.cursor = 'grabbing';
+        this.requestRender();
+        return;
       }
 
       // --- CURSOR HIGHLIGHT & POINTER FEEDBACK ---
@@ -2283,13 +2346,8 @@
       }
 
       // 1. Check if hovering over any obstacle
-      if (!isHoverInteractive) {
-        const hoverObs = [...this.obstacles].reverse().find(o => {
-          const effW = Math.max(o.widthMeters, 1.5);
-          const effD = Math.max(o.depthMeters, 1.5);
-          return o.containsPoint ? o.containsPoint(pos.x, pos.y) : isPointInOrientedRect(pos.x, pos.y, o.x, o.y, effW + 0.4, effD + 0.4, o.rotation);
-        });
-        if (hoverObs) isHoverInteractive = true;
+      if (!isHoverInteractive && this._findObstacleAt(pos.x, pos.y)) {
+        isHoverInteractive = true;
       }
 
       // 2. Check if hovering over rotation handle knob
@@ -2390,7 +2448,7 @@
       this.panX = mX - (mX - this.panX) * (newZoom / this.zoom);
       this.panY = mY - (mY - this.panY) * (newZoom / this.zoom);
       this.zoom = newZoom;
-      this.render();
+      this.requestRender();
     }
   }
 
