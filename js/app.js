@@ -3216,6 +3216,7 @@
         view3D?.classList.remove('active');
         viewAruco?.classList.remove('active');
         appRoot?.classList.remove('aruco-active');
+        this.babylonEngine?.stopRenderLoop();
         this.canvasEngine.resizeCanvas();
       };
 
@@ -3227,9 +3228,10 @@
         view2D?.classList.remove('active');
         viewAruco?.classList.remove('active');
         appRoot?.classList.remove('aruco-active');
-        this.babylonEngine.updateScene(this.field, this.canvasEngine.obstacles, this.pathModel);
-        // CRITICAL: Resize Babylon engine immediately upon becoming visible!
         if (this.babylonEngine) {
+          this.babylonEngine.updateScene(this.field, this.canvasEngine.obstacles, this.pathModel);
+          this.babylonEngine.startRenderLoop();
+          // CRITICAL: Resize Babylon engine immediately upon becoming visible!
           this.babylonEngine.resize();
           requestAnimationFrame(() => {
             this.babylonEngine.resize();
@@ -3245,6 +3247,7 @@
         view2D?.classList.remove('active');
         view3D?.classList.remove('active');
         appRoot?.classList.add('aruco-active');
+        this.babylonEngine?.stopRenderLoop();
         // Synchronize AR 3D Course with current field, obstacles and path
         if (this.arucoBabylonEngine) {
           this.arucoBabylonEngine.updateScene(this.field, this.canvasEngine.obstacles, this.pathModel);

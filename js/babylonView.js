@@ -34,7 +34,10 @@ class BabylonEngine {
     this.engine = null;
     this.scene = null;
     this.camera = null;
-    this.shadowGenerator = null;
+    this._isRenderLoopActive = false;
+    this._renderLoopFn = () => {
+      if (this.scene) this.scene.render();
+    };
     this.courseRoot = null;
     this.obstaclesGroup = null;
     this.trajectoryGroup = null;
@@ -66,7 +69,7 @@ class BabylonEngine {
       if (this.mode === 'ar') {
         // Transparent AR Engine & Scene (use exact 1:1 buffer dimensions to match OpenCV canvas)
         this.engine = new BABYLON.Engine(this.canvas, true, {
-          preserveDrawingBuffer: true,
+          preserveDrawingBuffer: false,
           stencil: true,
           alpha: true
         }, false);
@@ -96,7 +99,7 @@ class BabylonEngine {
         dirLight.intensity = 0.8;
       } else {
         // Orbit 3D Visualizer Engine & Scene
-        this.engine = new BABYLON.Engine(this.canvas, true, { preserveDrawingBuffer: true, stencil: true });
+        this.engine = new BABYLON.Engine(this.canvas, true, { preserveDrawingBuffer: false, stencil: true });
         this.scene = new BABYLON.Scene(this.engine);
         this.scene.clearColor = new BABYLON.Color4(0.04, 0.07, 0.12, 1.0); // Rich dark navy background
 
@@ -126,14 +129,10 @@ class BabylonEngine {
         hemiLight.diffuse = new BABYLON.Color3(0.95, 0.98, 1.0);
         hemiLight.groundColor = new BABYLON.Color3(0.15, 0.25, 0.15);
 
-        // Directional Sunlight with Shadows
+        // Directional Sunlight
         const dirLight = new BABYLON.DirectionalLight("dirLight", new BABYLON.Vector3(-1, -2.5, -1), this.scene);
         dirLight.position = new BABYLON.Vector3(30, 50, 30);
         dirLight.intensity = 0.85;
-
-        this.shadowGenerator = new BABYLON.ShadowGenerator(1024, dirLight);
-        this.shadowGenerator.useBlurExponentialShadowMap = true;
-        this.shadowGenerator.blurKernel = 16;
       }
 
       // Root TransformNode for entire course (moves/rotates all course meshes together in AR)
@@ -142,12 +141,10 @@ class BabylonEngine {
         this.courseRoot.setEnabled(false); // Initially hidden until marker aligned
       }
 
-      // Render loop. The AR view has none: it is rendered once per analyzed camera frame (renderAr),
-      // so the overlay always belongs to the video frame it is drawn on.
-      if (this.mode !== 'ar') {
-        this.engine.runRenderLoop(() => {
-          if (this.scene) this.scene.render();
-        });
+      // Render loop. The AR view has none: it is rendered once per analyzed camera frame (renderAr).
+      // The orbit view only runs its loop while its canvas is visible (started in switchTo3D).
+      if (this.mode !== 'ar' && this.canvas && this.canvas.clientWidth > 0 && this.canvas.clientHeight > 0) {
+        this.startRenderLoop();
       }
 
       window.addEventListener('resize', () => {
@@ -160,19 +157,37 @@ class BabylonEngine {
     }
   }
 
+  /** Starts the orbit 3D render loop if not already running. */
+  startRenderLoop() {
+    if (this.mode === 'ar' || !this.engine || this._isRenderLoopActive) return;
+    this._isRenderLoopActive = true;
+    this.engine.runRenderLoop(this._renderLoopFn);
+  }
+
+  /** Pauses the orbit 3D render loop to avoid GPU work when the tab is hidden. */
+  stopRenderLoop() {
+    if (!this.engine || !this._isRenderLoopActive) return;
+    this.engine.stopRenderLoop(this._renderLoopFn);
+    this._isRenderLoopActive = false;
+  }
+
   resize() {
-    if (this.engine) {
-      if (this.mode === 'ar') {
-        // The AR buffer always has the size of the video frame; CSS scales it together with the video
-        if (this._arSize) {
-          this.engine.setSize(this._arSize.width, this._arSize.height, true);
-        }
-      } else {
-        this.engine.resize();
+    if (!this.engine || !this.canvas) return;
+    const isHidden = this.canvas.clientWidth === 0 || this.canvas.clientHeight === 0;
+    if (this.mode === 'ar') {
+      // The AR buffer always has the size of the video frame; CSS scales it together with the video
+      if (this._arSize) {
+        this.engine.setSize(this._arSize.width, this._arSize.height, true);
       }
-      if (this.scene) {
+      if (!isHidden && this.scene) {
         this.scene.render();
       }
+      return;
+    }
+    if (isHidden) return;
+    this.engine.resize();
+    if (this.scene) {
+      this.scene.render();
     }
   }
 
@@ -275,17 +290,30 @@ class BabylonEngine {
     this.currentPathModel = pathModel;
 
     // 1. Build Grass Ground Plane
-    if (this.groundMesh) this.groundMesh.dispose();
-    if (this.borderTube) this.borderTube.dispose();
-    if (this.gridMesh) this.gridMesh.dispose();
+    if (this.groundMesh) {
+      this.groundMesh.dispose(false, true);
+      this.groundMesh = null;
+      this.groundMat = null;
+    }
+    if (this.borderTube) {
+      this.borderTube.dispose(false, true);
+      this.borderTube = null;
+    }
+    if (this.gridMesh) {
+      this.gridMesh.dispose(false, true);
+      this.gridMesh = null;
+    }
     this._buildGround(field);
 
-    // 2. Clear old obstacles
-    if (this.obstaclesGroup) this.obstaclesGroup.dispose();
+    // 2. Clear old obstacles (shared mat_* materials stay cached on scene)
+    if (this.obstaclesGroup) {
+      this.obstaclesGroup.dispose();
+      this.obstaclesGroup = null;
+    }
     this.obstaclesGroup = new BABYLON.TransformNode("obstaclesGroup", this.scene);
 
-    // 3. Clear old trajectory
-    if (this.trajectoryGroup) this.trajectoryGroup.dispose();
+    // 3. Clear old trajectory, materials & DynamicTextures
+    this._disposeTrajectoryGroup();
     this.trajectoryGroup = new BABYLON.TransformNode("trajectoryGroup", this.scene);
 
     // 4. Build 3D Obstacles
@@ -310,14 +338,46 @@ class BabylonEngine {
     this.resize();
   }
 
+  /** Disposes trajectory meshes along with their owned materials and DynamicTextures. */
+  _disposeTrajectoryGroup() {
+    if (!this.trajectoryGroup) return;
+    const childMeshes = this.trajectoryGroup.getChildMeshes(false);
+    childMeshes.forEach(mesh => {
+      const mat = mesh.material;
+      if (mat) {
+        if (mat.diffuseTexture) {
+          mat.diffuseTexture.dispose();
+        }
+        mat.dispose(true, true);
+      }
+    });
+    this.trajectoryGroup.dispose(false, true);
+    this.trajectoryGroup = null;
+  }
+
   // --- FIELD GROUND BUILDER ---
   _buildGround(field) {
     const w = field ? field.widthMeters : 40;
     const l = field ? field.lengthMeters : 20;
+    const halfW = w / 2;
+    const halfL = l / 2;
 
-    // Green Grass Ground Box
-    this.groundMesh = BABYLON.MeshBuilder.CreateBox("ground", { width: w, depth: l, height: 0.2 }, this.scene);
-    this.groundMesh.position.y = -0.1;
+    const poly2D = (field && typeof field.getBoundaryPolygon === 'function')
+      ? field.getBoundaryPolygon()
+      : [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: l }, { x: 0, y: l }];
+
+    const polyXZ = poly2D.map(pt => ({
+      x: pt.x - halfW,
+      z: -(pt.y - halfL)
+    }));
+
+    // Green Grass Ground Mesh (Rectangle uses box; L-shape/Octagon use triangulated polygon slab)
+    if (!field || !field.shape || field.shape === 'rectangle' || polyXZ.length < 3) {
+      this.groundMesh = BABYLON.MeshBuilder.CreateBox("ground", { width: w, depth: l, height: 0.2 }, this.scene);
+      this.groundMesh.position.y = -0.1;
+    } else {
+      this.groundMesh = this._buildPolygonGroundMesh(polyXZ, 0.2);
+    }
 
     const grassMat = new BABYLON.StandardMaterial("grassMat", this.scene);
     grassMat.diffuseColor = new BABYLON.Color3(0.08, 0.38, 0.18); // Deep rich agility turf green
@@ -327,33 +387,169 @@ class BabylonEngine {
     grassMat.backFaceCulling = false;
     this.groundMat = grassMat;
     this.groundMesh.material = grassMat;
-    this.groundMesh.receiveShadows = true;
 
-    // White / Gold Perimeter Field Boundary Tube
-    const perimeterPts = [
-      new BABYLON.Vector3(-w / 2, 0.02, -l / 2),
-      new BABYLON.Vector3(w / 2, 0.02, -l / 2),
-      new BABYLON.Vector3(w / 2, 0.02, l / 2),
-      new BABYLON.Vector3(-w / 2, 0.02, l / 2),
-      new BABYLON.Vector3(-w / 2, 0.02, -l / 2)
-    ];
+    // Gold Perimeter Field Boundary Tube following actual field polygon
+    const perimeterPts = polyXZ.map(pt => new BABYLON.Vector3(pt.x, 0.02, pt.z));
+    if (perimeterPts.length > 0) {
+      perimeterPts.push(perimeterPts[0].clone());
+    }
     this.borderTube = BABYLON.MeshBuilder.CreateTube("borderTube", { path: perimeterPts, radius: 0.08 }, this.scene);
     const borderMat = new BABYLON.StandardMaterial("borderMat", this.scene);
     borderMat.diffuseColor = new BABYLON.Color3(0.95, 0.75, 0.1); // Gold boundary line
     borderMat.emissiveColor = new BABYLON.Color3(0.3, 0.2, 0.0);
     this.borderTube.material = borderMat;
 
-    // Grid Floor Markings (Subtle grid lines)
+    // Grid Floor Markings centered around 0 (multiples of gridStep) and clipped to field polygon
     const gridLines = [];
     const gridStep = 5; // Every 5 meters
-    for (let x = -Math.floor(w / 2); x <= Math.floor(w / 2); x += gridStep) {
-      gridLines.push([new BABYLON.Vector3(x, 0.01, -l / 2), new BABYLON.Vector3(x, 0.01, l / 2)]);
+    const maxGX = Math.floor(halfW / gridStep) * gridStep;
+    const maxGZ = Math.floor(halfL / gridStep) * gridStep;
+    for (let x = -maxGX; x <= maxGX; x += gridStep) {
+      const spans = this._clipAxisLineToPolygon(x, true, polyXZ);
+      for (const [z0, z1] of spans) {
+        gridLines.push([new BABYLON.Vector3(x, 0.01, z0), new BABYLON.Vector3(x, 0.01, z1)]);
+      }
     }
-    for (let z = -Math.floor(l / 2); z <= Math.floor(l / 2); z += gridStep) {
-      gridLines.push([new BABYLON.Vector3(-w / 2, 0.01, z), new BABYLON.Vector3(w / 2, 0.01, z)]);
+    for (let z = -maxGZ; z <= maxGZ; z += gridStep) {
+      const spans = this._clipAxisLineToPolygon(z, false, polyXZ);
+      for (const [x0, x1] of spans) {
+        gridLines.push([new BABYLON.Vector3(x0, 0.01, z), new BABYLON.Vector3(x1, 0.01, z)]);
+      }
     }
-    this.gridMesh = BABYLON.MeshBuilder.CreateLineSystem("gridLines", { lines: gridLines }, this.scene);
-    this.gridMesh.color = new BABYLON.Color3(0.15, 0.55, 0.28);
+    if (gridLines.length > 0) {
+      this.gridMesh = BABYLON.MeshBuilder.CreateLineSystem("gridLines", { lines: gridLines }, this.scene);
+      this.gridMesh.color = new BABYLON.Color3(0.15, 0.55, 0.28);
+    }
+  }
+
+  /**
+   * Clips an axis-aligned line (x = coord or z = coord) against a simple XZ polygon.
+   * Returns paired [start, end] intervals strictly inside the polygon interior.
+   */
+  _clipAxisLineToPolygon(coord, isVertical, polyXZ) {
+    const hits = [];
+    const n = polyXZ.length;
+    for (let i = 0; i < n; i++) {
+      const a = polyXZ[i];
+      const b = polyXZ[(i + 1) % n];
+      const aMain = isVertical ? a.x : a.z;
+      const bMain = isVertical ? b.x : b.z;
+      if ((aMain <= coord && bMain > coord) || (bMain <= coord && aMain > coord)) {
+        const t = (coord - aMain) / (bMain - aMain);
+        const aCross = isVertical ? a.z : a.x;
+        const bCross = isVertical ? b.z : b.x;
+        hits.push(aCross + t * (bCross - aCross));
+      }
+    }
+    hits.sort((u, v) => u - v);
+    const spans = [];
+    for (let i = 0; i + 1 < hits.length; i += 2) {
+      if (hits[i + 1] - hits[i] > 1e-4) {
+        spans.push([hits[i], hits[i + 1]]);
+      }
+    }
+    return spans;
+  }
+
+  /** Triangulates a simple 2D XZ polygon via ear clipping (no external earcut needed). */
+  _triangulateEarClip2D(polyXZ) {
+    const n = polyXZ.length;
+    if (n < 3) return [];
+    let area = 0;
+    for (let i = 0; i < n; i++) {
+      const p1 = polyXZ[i];
+      const p2 = polyXZ[(i + 1) % n];
+      area += p1.x * p2.z - p2.x * p1.z;
+    }
+    const indices = [];
+    for (let i = 0; i < n; i++) indices.push(area >= 0 ? i : n - 1 - i);
+
+    const cross = (a, b, c) => (b.x - a.x) * (c.z - a.z) - (b.z - a.z) * (c.x - a.x);
+    const pointInTri = (p, a, b, c) =>
+      cross(a, b, p) >= 0 && cross(b, c, p) >= 0 && cross(c, a, p) >= 0;
+
+    const tris = [];
+    let guard = n * n;
+    while (indices.length > 3 && guard-- > 0) {
+      let clipped = false;
+      const m = indices.length;
+      for (let k = 0; k < m; k++) {
+        const i0 = indices[(k - 1 + m) % m];
+        const i1 = indices[k];
+        const i2 = indices[(k + 1) % m];
+        const a = polyXZ[i0], b = polyXZ[i1], c = polyXZ[i2];
+        if (cross(a, b, c) <= 1e-6) continue;
+        let containsOther = false;
+        for (let j = 0; j < m; j++) {
+          const ij = indices[j];
+          if (ij === i0 || ij === i1 || ij === i2) continue;
+          if (pointInTri(polyXZ[ij], a, b, c)) {
+            containsOther = true;
+            break;
+          }
+        }
+        if (!containsOther) {
+          tris.push([i0, i1, i2]);
+          indices.splice(k, 1);
+          clipped = true;
+          break;
+        }
+      }
+      if (!clipped) break;
+    }
+    if (indices.length === 3) {
+      tris.push([indices[0], indices[1], indices[2]]);
+    }
+    return tris;
+  }
+
+  /** Builds a watertight extruded ground slab mesh from a 2D XZ polygon. */
+  _buildPolygonGroundMesh(polyXZ, height = 0.2) {
+    const tris = this._triangulateEarClip2D(polyXZ);
+    const positions = [];
+    const normals = [];
+    const indices = [];
+    const n = polyXZ.length;
+
+    // Top face vertices [0..n-1] at y = 0
+    for (let i = 0; i < n; i++) {
+      positions.push(polyXZ[i].x, 0, polyXZ[i].z);
+      normals.push(0, 1, 0);
+    }
+    // Bottom face vertices [n..2n-1] at y = -height
+    for (let i = 0; i < n; i++) {
+      positions.push(polyXZ[i].x, -height, polyXZ[i].z);
+      normals.push(0, -1, 0);
+    }
+    for (const [i0, i1, i2] of tris) {
+      indices.push(i0, i1, i2);
+      indices.push(n + i0, n + i2, n + i1);
+    }
+    // Side walls
+    for (let i = 0; i < n; i++) {
+      const next = (i + 1) % n;
+      const a = polyXZ[i], b = polyXZ[next];
+      const dx = b.x - a.x, dz = b.z - a.z;
+      const len = Math.hypot(dx, dz) || 1;
+      const nx = -dz / len, nz = dx / len;
+      const base = positions.length / 3;
+      positions.push(
+        a.x, 0, a.z,
+        b.x, 0, b.z,
+        b.x, -height, b.z,
+        a.x, -height, a.z
+      );
+      for (let v = 0; v < 4; v++) normals.push(nx, 0, nz);
+      indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
+
+    const mesh = new BABYLON.Mesh("ground", this.scene);
+    const vertexData = new BABYLON.VertexData();
+    vertexData.positions = positions;
+    vertexData.normals = normals;
+    vertexData.indices = indices;
+    vertexData.applyToMesh(mesh);
+    return mesh;
   }
 
   // --- 2D -> 3D COORDINATE CONVERSION ---
@@ -473,12 +669,10 @@ class BabylonEngine {
     const leftPost = BABYLON.MeshBuilder.CreateCylinder("postL", { height: postHeight, diameter: postRadius * 2 }, this.scene);
     leftPost.position = new BABYLON.Vector3(-w / 2, postHeight / 2, 0);
     leftPost.material = barMat; leftPost.parent = parent;
-    if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(leftPost);
 
     const rightPost = BABYLON.MeshBuilder.CreateCylinder("postR", { height: postHeight, diameter: postRadius * 2 }, this.scene);
     rightPost.position = new BABYLON.Vector3(w / 2, postHeight / 2, 0);
     rightPost.material = barMat; rightPost.parent = parent;
-    if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(rightPost);
 
     // Horizontal Jump Bars
     const barRadius = 0.035;
@@ -492,7 +686,6 @@ class BabylonEngine {
       bar.rotation.z = Math.PI / 2;
       bar.position = new BABYLON.Vector3(0, barHeight, zOffset);
       bar.material = mainMat; bar.parent = parent;
-      if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(bar);
     }
   }
 
@@ -512,14 +705,12 @@ class BabylonEngine {
     tire.rotation.x = Math.PI / 2; tire.position = new BABYLON.Vector3(0, 0.65, 0);
     tire.material = this._getMaterial("cyan", new BABYLON.Color3(0.02, 0.71, 0.83));
     tire.parent = parent;
-    if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(tire);
   }
 
   _buildWall3D(parent, w, d, mainMat, postMat, whiteMat) {
     const wallHeight = 0.65;
     const wall = BABYLON.MeshBuilder.CreateBox("wallBody", { width: w, height: wallHeight, depth: d }, this.scene);
     wall.position = new BABYLON.Vector3(0, wallHeight / 2, 0); wall.material = mainMat; wall.parent = parent;
-    if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(wall);
 
     // Towers
     const towerH = 1.1;
@@ -538,7 +729,6 @@ class BabylonEngine {
       const h = 0.15 + i * 0.05;
       const plank = BABYLON.MeshBuilder.CreateBox(`plank_${i}`, { width: w, height: h, depth: 0.2 }, this.scene);
       plank.position = new BABYLON.Vector3(0, h / 2, z); plank.material = i % 2 === 0 ? mainMat : whiteMat; plank.parent = parent;
-      if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(plank);
     }
   }
 
@@ -584,21 +774,22 @@ class BabylonEngine {
     const rampLen = 3.6;
     const rampZDist = Math.sqrt(Math.max(rampLen * rampLen - elevatedH * elevatedH, 1));
     const centerLen = d - 2 * rampZDist;
+    const effectiveCenterLen = Math.max(centerLen, 3.6);
     const halfD = d / 2;
     const contactLen = 0.9;
     const rampAngle = Math.asin(elevatedH / rampLen);
 
     // 1. Center Elevated Horizontal Plank
-    const centerPlank = BABYLON.MeshBuilder.CreateBox("dwCenter", { width: w, height: 0.08, depth: Math.max(centerLen, 3.6) }, this.scene);
+    const centerPlank = BABYLON.MeshBuilder.CreateBox("dwCenter", { width: w, height: 0.08, depth: effectiveCenterLen }, this.scene);
     centerPlank.position = new BABYLON.Vector3(0, elevatedH, 0);
     centerPlank.material = greenMat; centerPlank.parent = parent;
 
-    // Trestle legs
+    // Trestle legs clamped to center plank bounds
     const legL = BABYLON.MeshBuilder.CreateCylinder("legL", { height: elevatedH, diameter: 0.06 }, this.scene);
-    legL.position = new BABYLON.Vector3(0, elevatedH / 2, -centerLen / 2); legL.material = frameMat; legL.parent = parent;
+    legL.position = new BABYLON.Vector3(0, elevatedH / 2, -effectiveCenterLen / 2); legL.material = frameMat; legL.parent = parent;
 
     const legR = BABYLON.MeshBuilder.CreateCylinder("legR", { height: elevatedH, diameter: 0.06 }, this.scene);
-    legR.position = new BABYLON.Vector3(0, elevatedH / 2, centerLen / 2); legR.material = frameMat; legR.parent = parent;
+    legR.position = new BABYLON.Vector3(0, elevatedH / 2, effectiveCenterLen / 2); legR.material = frameMat; legR.parent = parent;
 
     // 2. Up Ramp
     const upRampNode = new BABYLON.TransformNode("dwUpRampNode", this.scene);
@@ -676,7 +867,6 @@ class BabylonEngine {
 
     const tunnelMesh = BABYLON.MeshBuilder.CreateTube("tunnelTube", { path: path, radius: tunnelRadius, sideOrientation: BABYLON.Mesh.DOUBLESIDE }, this.scene);
     tunnelMesh.material = pipeMat; tunnelMesh.parent = parent;
-    if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(tunnelMesh);
 
     // // Entrance and Exit Yellow Collar Rings
     // const collarA = BABYLON.MeshBuilder.CreateTorus("collarA", { diameter: tunnelRadius * 2 + 0.08, thickness: 0.08 }, this.scene);
@@ -703,7 +893,6 @@ class BabylonEngine {
       pole.position = new BABYLON.Vector3(0, poleH / 2, z);
       pole.material = i % 2 === 0 ? purpleMat : whiteMat;
       pole.parent = parent;
-      if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(pole);
     }
   }
 
@@ -770,7 +959,7 @@ class BabylonEngine {
       disc.position = pos3D;
       disc.parent = this.trajectoryGroup;
 
-      const badgeMat = new BABYLON.StandardMaterial("badgeMat", this.scene);
+      const badgeMat = new BABYLON.StandardMaterial(`badgeMat_${obs.id}`, this.scene);
       badgeMat.diffuseColor = new BABYLON.Color3(0, 0, 0);
       badgeMat.emissiveColor = new BABYLON.Color3(0.8, 0.8, 0.8);
       disc.material = badgeMat;
