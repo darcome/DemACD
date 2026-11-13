@@ -60,7 +60,7 @@
         <div class="brand-logo">
           <i class="fa-solid fa-dog"></i>
         </div>
-        <div class="brand-title">Agility Course Designer 1.13.0</div>
+        <div class="brand-title">Agility Course Designer 1.14.0</div>
       </div>
 
       <!-- 2D / 3D / ArUco View Mode Tab Switcher -->
@@ -142,6 +142,12 @@
         <!-- 2D Canvas Workspace -->
         <div id="view-2d-container" class="workspace-view active">
           <canvas id="agility-canvas"></canvas>
+
+          <!-- Scale Ruler Indicator Overlay -->
+          <div class="scale-ruler-overlay">
+            <div class="ruler-bar"></div>
+            <span id="scale-ruler-text" class="ruler-text">1 m = 30px</span>
+          </div>
 
           <!-- Canvas Floating HUD controls -->
           <div class="canvas-hud">
