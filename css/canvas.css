@@ -43,7 +43,7 @@
 .scale-ruler-overlay {
   position: absolute;
   top: 20px;
-  left: 20px;
+  left: 36px;
   background: var(--glass-bg);
   backdrop-filter: blur(16px);
   border: 1px solid var(--glass-border);

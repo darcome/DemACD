@@ -1569,13 +1569,6 @@
       }
     }
 
-    static _renderPauseTable(ctx, obs, w, d) {
-      ctx.fillStyle = '#ec4899'; ctx.fillRect(-w / 2, -d / 2, w, d);
-      ctx.strokeStyle = '#831843'; ctx.lineWidth = 3; ctx.strokeRect(-w / 2, -d / 2, w, d);
-      ctx.fillStyle = '#ffffff'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText('TABLE', 0, 0);
-    }
-
     static _renderStartFinish(ctx, obs, w, d) {
       const halfW = w / 2;
       ctx.strokeStyle = '#ef4444'; 
@@ -1673,6 +1666,14 @@
       this.isSpacePressed = false;
       this.isTouchPinching = false; this.touchPinchDist = 0; this.touchPinchCenter = { x: 0, y: 0 };
       this._rafRenderId = null;
+
+      // Cached 2D HUD & scale ruler elements and last rendered values
+      this._fieldDimEl = document.getElementById('hud-field-dim');
+      this._rulerTextEl = document.getElementById('scale-ruler-text');
+      this._rulerBarEl = document.querySelector('#view-2d-container .ruler-bar') || document.querySelector('.ruler-bar');
+      this._lastFieldDim = null;
+      this._lastRulerText = null;
+      this._lastRulerBarWidth = null;
 
       this._initEvents();
       this.resizeCanvas();
@@ -1796,15 +1797,26 @@
       const rect = this.canvas.getBoundingClientRect();
       const w = rect.width, h = rect.height;
 
-      const fieldDimEl = document.getElementById('hud-field-dim');
-      if (fieldDimEl) fieldDimEl.textContent = `${this.field.widthMeters}${this.field.unit} × ${this.field.lengthMeters}${this.field.unit} (${this.field.shape.toUpperCase()})`;
+      const fieldDimText = `${this.field.widthMeters}${this.field.unit} × ${this.field.lengthMeters}${this.field.unit} (${this.field.shape.toUpperCase()})`;
+      if (this._fieldDimEl && fieldDimText !== this._lastFieldDim) {
+        this._lastFieldDim = fieldDimText;
+        this._fieldDimEl.textContent = fieldDimText;
+      }
 
-      const rulerTextEl = document.getElementById('scale-ruler-text');
-      if (rulerTextEl) {
+      if (this._rulerTextEl) {
         const scaleMeterPx = this.field.toPixels(1) * this.zoom;
-        rulerTextEl.textContent = `1 ${this.field.unit} = ${Math.round(scaleMeterPx)}px`;
-        const rulerBar = document.querySelector('.ruler-bar');
-        if (rulerBar) rulerBar.style.width = `${Math.min(120, Math.max(30, scaleMeterPx))}px`;
+        const rulerText = `1 ${this.field.unit} = ${Math.round(scaleMeterPx)}px`;
+        if (rulerText !== this._lastRulerText) {
+          this._lastRulerText = rulerText;
+          this._rulerTextEl.textContent = rulerText;
+        }
+        if (this._rulerBarEl) {
+          const barWidth = `${Math.min(120, Math.max(30, scaleMeterPx))}px`;
+          if (barWidth !== this._lastRulerBarWidth) {
+            this._lastRulerBarWidth = barWidth;
+            this._rulerBarEl.style.width = barWidth;
+          }
+        }
       }
 
       this.ctx.clearRect(0, 0, w, h);
