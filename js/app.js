@@ -1696,12 +1696,18 @@
       this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       this.render();
     }
-    setObstacles(list) { this.obstacles = list; this.render(); }
+    notifyCourseChanged() {
+      if (typeof this.onCourseChange === 'function') {
+        this.onCourseChange();
+      }
+    }
+    setObstacles(list) { this.obstacles = list; this.render(); this.notifyCourseChanged(); }
     addObstacle(obs) {
       this.obstacles.push(obs);
       this.selectObstacle(obs);
       this.historyManager.push(this.getSnapshot());
       this.render();
+      this.notifyCourseChanged();
     }
     selectObstacle(obs, addToSelection = false) {
       if (!addToSelection) {
@@ -1727,6 +1733,7 @@
       this.clearSelection();
       this.historyManager.push(this.getSnapshot());
       this.render();
+      this.notifyCourseChanged();
     }
     duplicateSelected() {
       if (this.selectedObstacles.length === 0) return;
@@ -1756,6 +1763,7 @@
       newItems.forEach(i => this.selectObstacle(i, true));
       this.historyManager.push(this.getSnapshot());
       this.render();
+      this.notifyCourseChanged();
     }
     getSnapshot() {
       return {
@@ -1781,6 +1789,7 @@
       this.syncHeaderToggles();
       this.clearSelection();
       this.render();
+      this.notifyCourseChanged();
     }
     screenToField(sX, sY) {
       const rect = this.canvas.getBoundingClientRect();
@@ -1794,8 +1803,6 @@
         cancelAnimationFrame(this._rafRenderId);
         this._rafRenderId = null;
       }
-      const rect = this.canvas.getBoundingClientRect();
-      const w = rect.width, h = rect.height;
 
       const fieldDimText = `${this.field.widthMeters}${this.field.unit} × ${this.field.lengthMeters}${this.field.unit} (${this.field.shape.toUpperCase()})`;
       if (this._fieldDimEl && fieldDimText !== this._lastFieldDim) {
@@ -1819,7 +1826,12 @@
         }
       }
 
-      this.ctx.clearRect(0, 0, w, h);
+      // Clear full backing pixel buffer regardless of DPR or hidden view (e.g. PNG export from 3D/ArUco tab)
+      this.ctx.save();
+      this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+      this.ctx.restore();
+
       this.ctx.save();
       this.ctx.translate(this.panX, this.panY);
       this.ctx.scale(this.zoom, this.zoom);
@@ -2026,13 +2038,21 @@
         this._onMouseDown({ clientX: t.clientX, clientY: t.clientY, button: 0 });
       } else if (e.touches.length === 2) {
         this.isTouchPinching = true;
+        this.isMeasuring = false;
         this.isDragging = false;
+        this.dragInitialPositions = null;
         this.isPanning = false;
         this.panStartedOnEmpty = false;
         this.isRotating = false;
+        this.rotatingObs = null;
         this.isDraggingTunnelNode = false;
+        this.draggedTunnelObs = null;
         this.isDraggingPathNode = false;
+        this.draggedPathNode = null;
         this.isDraggingBadge = false;
+        this.draggedBadgeObs = null;
+        this.draggedBadgeSeq = null;
+        this.requestRender();
 
         const t1 = e.touches[0];
         const t2 = e.touches[1];
@@ -2307,6 +2327,8 @@
         if (this.field.snapToGrid) {
           angleDeg = Math.round(angleDeg / 15) * 15; // Snap to 15 deg steps
         }
+        while (angleDeg > 180) angleDeg -= 360;
+        while (angleDeg < -180) angleDeg += 360;
         this.rotatingObs.rotation = angleDeg;
         if (typeof this.onObstacleChange === 'function') {
           this.onObstacleChange(this.rotatingObs);
@@ -2522,7 +2544,12 @@
       this.canvasEngine = canvasEngine;
       this.historyManager = historyManager;
       this.selectedObstacle = null;
+      this._seqDirty = false;
       this.canvasEngine.onSelectionChange = sel => {
+        if (this._seqDirty) {
+          this._seqDirty = false;
+          this.historyManager.push(this.canvasEngine.getSnapshot());
+        }
         this.selectedObstacle = sel.length === 1 ? sel[0] : null;
         this.render();
       };
@@ -2531,6 +2558,7 @@
         if (typeof prevObsChange === 'function') prevObsChange(obs);
         if (this.selectedObstacle === obs) {
           this._updateBadgeAnglesDisplay();
+          this._updateRotationDisplay();
         }
       };
       this.render();
@@ -2640,25 +2668,31 @@
         if (!raw) {
           obs.seq = null;
         } else {
-          const arr = raw.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n) && n > 0);
+          const arr = Array.from(new Set(raw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n > 0)));
           obs.seq = arr.length === 0 ? null : (arr.length === 1 ? arr[0] : arr);
         }
         if (typeof obs.cleanBadgeAngles === 'function') {
           obs.cleanBadgeAngles();
         }
+        this._seqDirty = true;
         this._updateBadgeAnglesDisplay();
         this.canvasEngine.render();
+        this.canvasEngine.notifyCourseChanged();
       });
       this.container.querySelector('#prop-seq')?.addEventListener('change', () => {
+        this._seqDirty = false;
         this.render();
         this.historyManager.push(this.canvasEngine.getSnapshot());
+        this.canvasEngine.notifyCourseChanged();
       });
       this.container.querySelector('#btn-clear-seq')?.addEventListener('click', () => {
+        this._seqDirty = false;
         obs.seq = null;
         if (typeof obs.cleanBadgeAngles === 'function') obs.cleanBadgeAngles();
         this.render();
         this.canvasEngine.render();
         this.historyManager.push(this.canvasEngine.getSnapshot());
+        this.canvasEngine.notifyCourseChanged();
       });
       this.container.querySelector('#btn-distribute-seq-angles')?.addEventListener('click', () => {
         const seqs = obs.getSeqArray();
@@ -2682,6 +2716,7 @@
           this.render();
           this.historyManager.push(this.canvasEngine.getSnapshot());
           this.canvasEngine.render();
+          this.canvasEngine.notifyCourseChanged();
         });
       });
       this.container.querySelector('#prop-rotation')?.addEventListener('input', e => {
@@ -2689,6 +2724,7 @@
         const rotLabel = this.container.querySelector('#prop-rot-val');
         if (rotLabel) rotLabel.textContent = obs.rotation;
         this.canvasEngine.render();
+        this.canvasEngine.notifyCourseChanged();
       });
       this.container.querySelector('#prop-rotation')?.addEventListener('change', () => {
         this.historyManager.push(this.canvasEngine.getSnapshot());
@@ -2699,6 +2735,7 @@
           this.render();
           this.canvasEngine.render();
           this.historyManager.push(this.canvasEngine.getSnapshot());
+          this.canvasEngine.notifyCourseChanged();
         });
       });
       this.container.querySelector('#btn-straighten-tunnel')?.addEventListener('click', () => {
@@ -2706,8 +2743,18 @@
         this.render();
         this.canvasEngine.render();
         this.historyManager.push(this.canvasEngine.getSnapshot());
+        this.canvasEngine.notifyCourseChanged();
       });
       this.container.querySelector('#btn-duplicate')?.addEventListener('click', () => this.canvasEngine.duplicateSelected());
+    }
+
+    _updateRotationDisplay() {
+      if (!this.selectedObstacle) return;
+      const obs = this.selectedObstacle;
+      const rotSlider = this.container.querySelector('#prop-rotation');
+      const rotLabel = this.container.querySelector('#prop-rot-val');
+      if (rotSlider) rotSlider.value = obs.rotation;
+      if (rotLabel) rotLabel.textContent = obs.rotation;
     }
 
     _updateBadgeAnglesDisplay() {
@@ -2730,9 +2777,29 @@
       this.field = field;
       this.canvasEngine = canvasEngine;
       this.historyManager = historyManager;
+      this._initialBgState = null;
     }
-    show() { this._render(); this.modal.classList.add('active'); }
-    hide() { this.modal.classList.remove('active'); }
+    show() {
+      this._initialBgState = {
+        showBgImage: this.field.showBgImage,
+        bgImageOpacity: this.field.bgImageOpacity
+      };
+      this._render();
+      this.modal.classList.add('active');
+    }
+    hide(applied = false) {
+      if (!applied && this._initialBgState) {
+        const changed = this.field.showBgImage !== this._initialBgState.showBgImage ||
+                        this.field.bgImageOpacity !== this._initialBgState.bgImageOpacity;
+        if (changed) {
+          this.field.showBgImage = this._initialBgState.showBgImage;
+          this.field.bgImageOpacity = this._initialBgState.bgImageOpacity;
+          this.canvasEngine.render();
+        }
+      }
+      this._initialBgState = null;
+      this.modal.classList.remove('active');
+    }
     _render() {
       this.modal.innerHTML = `
         <div class="modal-backdrop"></div>
@@ -2776,7 +2843,7 @@
               </div>
             </div>
             <div class="form-group" style="margin-top: 12px;">
-              <label class="checkbox-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; color: var(--text-secondary);">
+              <label class="checkbox-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; color: var(--text-muted);">
                 <input type="checkbox" id="field-scale-obstacles" checked>
                 <span>Scale obstacle positions proportionally to new field dimensions</span>
               </label>
@@ -2798,7 +2865,7 @@
                 </div>
                 ${this.field.bgImageDataUrl ? `
                   <div class="bg-image-settings-row" style="display: flex; flex-direction: column; gap: 10px; background: rgba(0, 0, 0, 0.2); padding: 12px; border-radius: 6px; border: 1px solid var(--panel-border);">
-                    <label class="checkbox-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; color: var(--text-secondary);">
+                    <label class="checkbox-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; color: var(--text-muted);">
                       <input type="checkbox" id="field-show-bg-image" ${this.field.showBgImage ? 'checked' : ''}>
                       <span>Show Image Overlay Layer</span>
                     </label>
@@ -2846,6 +2913,10 @@
             const reader = new FileReader();
             reader.onload = evt => {
               this.field.setBgImage(evt.target.result, () => {
+                this._initialBgState = {
+                  showBgImage: this.field.showBgImage,
+                  bgImageOpacity: this.field.bgImageOpacity
+                };
                 this.historyManager.push(this.canvasEngine.getSnapshot());
                 this.canvasEngine.render();
                 this._render();
@@ -2859,6 +2930,10 @@
       if (removeBtn) {
         removeBtn.addEventListener('click', () => {
           this.field.setBgImage(null, () => {
+            this._initialBgState = {
+              showBgImage: this.field.showBgImage,
+              bgImageOpacity: this.field.bgImageOpacity
+            };
             this.historyManager.push(this.canvasEngine.getSnapshot());
             this.canvasEngine.render();
             this._render();
@@ -2897,10 +2972,12 @@
 
         if (width > 0 && length > 0) {
           this.field.updateDimensions(width, length, shape);
+          const newW = this.field.widthMeters;
+          const newL = this.field.lengthMeters;
 
-          if (scaleObs && oldW > 0 && oldL > 0 && (width !== oldW || length !== oldL)) {
-            const scaleX = width / oldW;
-            const scaleY = length / oldL;
+          if (scaleObs && oldW > 0 && oldL > 0 && (newW !== oldW || newL !== oldL)) {
+            const scaleX = newW / oldW;
+            const scaleY = newL / oldL;
 
             // Scale all obstacle layout positions proportionally
             this.canvasEngine.obstacles.forEach(obs => {
@@ -2924,7 +3001,8 @@
 
           this.historyManager.push(this.canvasEngine.getSnapshot());
           this.canvasEngine.render();
-          this.hide();
+          this.canvasEngine.notifyCourseChanged();
+          this.hide(true);
         }
       });
     }
@@ -3049,6 +3127,8 @@
       this.arucoBabylonCanvas = document.getElementById('aruco-babylon-canvas');
       this.arucoBabylonEngine = new BabylonEngine(this.arucoBabylonCanvas, { mode: 'ar' });
       this.showAr3DCourse = true;
+      this._sync3DRafId = null;
+      this.canvasEngine.onCourseChange = () => this.scheduleSync3DViews();
       window.agilityApp = this;
 
       this.toolbar = new Toolbar(document.getElementById('toolbar-palette'), this.canvasEngine, this.field, this.historyManager);
@@ -3103,12 +3183,33 @@
       this._setArStatus(res, frame.width);
     }
 
+    scheduleSync3DViews() {
+      if (this._sync3DRafId !== null) return;
+      this._sync3DRafId = requestAnimationFrame(() => {
+        this._sync3DRafId = null;
+        this.syncActive3DViews();
+      });
+    }
+
+    syncActive3DViews() {
+      const view3D = document.getElementById('view-3d-container');
+      if (view3D?.classList.contains('active') && this.babylonEngine) {
+        this.babylonEngine.updateScene(this.field, this.canvasEngine.obstacles, this.pathModel);
+      }
+      const viewAruco = document.getElementById('view-aruco-container');
+      if (viewAruco?.classList.contains('active') && this.arucoBabylonEngine) {
+        this.arucoBabylonEngine.updateScene(this.field, this.canvasEngine.obstacles, this.pathModel);
+      }
+    }
+
     /** Camera stopped: clear the overlay and forget the pose (what was learned about the markers stays). */
     onArStopped() {
       if (window.arucoFieldTracker) {
         window.arucoFieldTracker.setLocked(false);
         window.arucoFieldTracker._dropTracking();
       }
+      this._arFitPx = null;
+      this._arPoorFit = false;
       this._syncArLockButton();
       if (this.arucoBabylonEngine) this.arucoBabylonEngine.renderAr(null);
       this._arStatusKey = null;
@@ -3157,6 +3258,8 @@
           ? '<i class="fa-solid fa-compass" style="color: #fbbf24;"></i> 3D: Holding (motion sensor)...'
           : '<i class="fa-solid fa-clock" style="color: #fbbf24;"></i> 3D: Holding Anchor...';
       } else {
+        this._arFitPx = null;
+        this._arPoorFit = false;
         key = 'lost';
         html = '<i class="fa-solid fa-magnifying-glass" style="color: #94a3b8;"></i> 3D: Searching Marker...';
       }

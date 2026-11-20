@@ -58,7 +58,9 @@ class BabylonEngine {
   }
 
   setGroundOpacity(val) {
-    this.groundOpacity = Math.max(0, Math.min(1, parseFloat(val)));
+    const parsed = parseFloat(val);
+    if (!Number.isFinite(parsed)) return;
+    this.groundOpacity = Math.max(0, Math.min(1, parsed));
     if (this.groundMat) {
       this.groundMat.alpha = this.groundOpacity;
     }
@@ -348,6 +350,9 @@ class BabylonEngine {
         if (mat.diffuseTexture) {
           mat.diffuseTexture.dispose();
         }
+        if (mat.emissiveTexture) {
+          mat.emissiveTexture.dispose();
+        }
         mat.dispose(true, true);
       }
     });
@@ -620,17 +625,13 @@ class BabylonEngine {
         case OBSTACLE_TYPES_3D.TUNNEL_4M:
         case OBSTACLE_TYPES_3D.TUNNEL_5M:
         case OBSTACLE_TYPES_3D.TUNNEL_6M:
-        case 'tunnel_3m':
-        case 'tunnel_4m':
-        case 'tunnel_5m':
-        case 'tunnel_6m':
           this._buildTunnel3D(obsNode, obs, field, blueMat, yellowMat);
           break;
 
         case OBSTACLE_TYPES_3D.WEAVE_6:
         case OBSTACLE_TYPES_3D.WEAVE_12:
           const polesCount = (obs.def && obs.def.poles) ? obs.def.poles : (obs.type === 'weave_12' ? 12 : 6);
-          this._buildWeaves3D(obsNode, w, d, polesCount, blueMat, whiteMat, navyMat);
+          this._buildWeaves3D(obsNode, w, d, polesCount, purpleMat, whiteMat, navyMat);
           break;
 
         case OBSTACLE_TYPES_3D.START_FINISH:
@@ -680,7 +681,7 @@ class BabylonEngine {
 
     for (let i = 0; i < barsCount; i++) {
       const zOffset = -d / 2 + barSpacing * (i + 1);
-      const barHeight = 0.1 + i * 0.15;
+      const barHeight = 0.55 + i * 0.15;
 
       const bar = BABYLON.MeshBuilder.CreateCylinder(`bar_${i}`, { height: w, diameter: barRadius * 2 }, this.scene);
       bar.rotation.z = Math.PI / 2;
@@ -960,15 +961,15 @@ class BabylonEngine {
       disc.parent = this.trajectoryGroup;
 
       const badgeMat = new BABYLON.StandardMaterial(`badgeMat_${obs.id}`, this.scene);
-      badgeMat.diffuseColor = new BABYLON.Color3(0, 0, 0);
-      badgeMat.emissiveColor = new BABYLON.Color3(0.8, 0.8, 0.8);
+      badgeMat.disableLighting = true;
+      badgeMat.emissiveColor = new BABYLON.Color3(0, 0, 0);
       disc.material = badgeMat;
 
       // Dynamic Texture with Sequence Number Text
       const dynamicTexture = new BABYLON.DynamicTexture(`dynamicTex_${obs.id}`, { width: 256, height: 256 }, this.scene);
       const fontSize = seqStr.length > 3 ? "bold 90px sans-serif" : "bold 130px sans-serif";
       dynamicTexture.drawText(seqStr, null, 170, fontSize, "black", "#fff", true);
-      badgeMat.diffuseTexture = dynamicTexture;
+      badgeMat.emissiveTexture = dynamicTexture;
     });
   }
 }

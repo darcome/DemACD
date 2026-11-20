@@ -143,6 +143,10 @@ class ArucoCameraDetector {
         };
 
         if (this.video.readyState >= 2 && this.video.videoWidth > 0) {
+          if (this.video.paused) {
+            const p = this.video.play();
+            if (p && typeof p.catch === 'function') p.catch(onError);
+          }
           onLoaded();
         } else {
           this.video.addEventListener('loadeddata', onLoaded);
@@ -202,6 +206,9 @@ class ArucoCameraDetector {
     if (stream) {
       if (this._ownsStream) stream.getTracks().forEach(track => track.stop());
       this.video.srcObject = null;
+    }
+    if (this.ctx && this.canvas) {
+      this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     }
     this._releaseFrames();
   }

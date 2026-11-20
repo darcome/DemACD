@@ -37,8 +37,10 @@ class ArUcoTrackerUI {
     this.isStreaming = false;
 
     this.fpsCounter = 0;
-    this.fpsLastTime = performance.now();
+    this.fpsLastTime = Date.now();
     this.currentFps = 0;
+    this._cameraStartToken = 0;
+    this._activeCameraKey = null;
 
     // Cached DOM references & previous rendered snapshots to avoid per-frame DOM thrashing
     this._dom = {};
@@ -227,6 +229,7 @@ class ArUcoTrackerUI {
 
   async startCamera(cameraSelection) {
     if (typeof detector === 'undefined' || !detector) return;
+    const prevCamera = this._activeCameraKey;
     if (cameraSelection) {
       this.currentCamera = cameraSelection;
     } else {
@@ -237,10 +240,25 @@ class ArUcoTrackerUI {
       this._lastFacingMode = this.currentCamera;
     }
 
+    const startToken = ++this._cameraStartToken;
+    const startBtn = this._dom.startBtn || document.getElementById('startBtn');
+    if (startBtn) startBtn.disabled = true;
+
+    const switchingCamera = prevCamera !== null && prevCamera !== this.currentCamera;
     // Stop existing stream if currently running
     if (detector.isRunning) {
       detector.stop();
     }
+    if (switchingCamera) {
+      if (window.arucoFieldTracker && typeof window.arucoFieldTracker.resetCamera === 'function') {
+        window.arucoFieldTracker.resetCamera();
+      }
+      if (window.agilityApp) {
+        if (typeof window.agilityApp._syncArLockButton === 'function') window.agilityApp._syncArLockButton();
+        if (window.agilityApp.arucoBabylonEngine) window.agilityApp.arucoBabylonEngine.renderAr(null);
+      }
+    }
+    this._activeCameraKey = this.currentCamera;
 
     let videoConstraint = {};
 
@@ -270,7 +288,15 @@ class ArUcoTrackerUI {
       };
     }
 
+    const isNonRecoverableCameraError = (err) => {
+      const name = err && err.name;
+      return name === 'NotAllowedError' || name === 'PermissionDeniedError' ||
+             name === 'NotFoundError' || name === 'DevicesNotFoundError' ||
+             name === 'NotReadableError' || name === 'SecurityError';
+    };
+
     const finalizeStart = async () => {
+      if (startToken !== this._cameraStartToken) return;
       if (!detector.isRunning) {
         this.onCameraStopped();
         return;
@@ -280,10 +306,23 @@ class ArUcoTrackerUI {
       await this.refreshCameraDevices();
     };
 
+    const handleFinalError = (finalErr) => {
+      if (startToken !== this._cameraStartToken) return;
+      this.onCameraStopped();
+      if (window.agilityApp && typeof window.agilityApp.onArStopped === 'function') {
+        window.agilityApp.onArStopped();
+      }
+      alert('Could not start camera: ' + (finalErr.message || finalErr));
+    };
+
     try {
       await detector.start({ video: videoConstraint });
       await finalizeStart();
     } catch (err) {
+      if (isNonRecoverableCameraError(err)) {
+        handleFinalError(err);
+        return;
+      }
       console.warn('Failed with primary video constraints, trying fallback facingMode:', err);
       try {
         const fallbackFacing = this._lastFacingMode || (this.currentCamera === 'user' ? 'user' : 'environment');
@@ -294,16 +333,16 @@ class ArUcoTrackerUI {
         });
         await finalizeStart();
       } catch (fallbackErr) {
+        if (isNonRecoverableCameraError(fallbackErr)) {
+          handleFinalError(fallbackErr);
+          return;
+        }
         console.warn('Fallback facingMode failed, trying generic video constraint:', fallbackErr);
         try {
           await detector.start({ video: true });
           await finalizeStart();
         } catch (finalErr) {
-          this.onCameraStopped();
-          if (window.agilityApp && typeof window.agilityApp.onArStopped === 'function') {
-            window.agilityApp.onArStopped();
-          }
-          alert('Could not start camera: ' + (finalErr.message || finalErr));
+          handleFinalError(finalErr);
         }
       }
     }
@@ -326,6 +365,8 @@ class ArUcoTrackerUI {
 
   onCameraStarted() {
     this.isStreaming = true;
+    this.fpsCounter = 0;
+    this.fpsLastTime = Date.now();
     const statusBadge = this._dom.statusBadge || document.getElementById('aruco-status-badge');
     if (statusBadge) {
       statusBadge.className = 'aruco-status-badge streaming';
@@ -343,6 +384,10 @@ class ArUcoTrackerUI {
 
   onCameraStopped() {
     this.isStreaming = false;
+    this.fpsCounter = 0;
+    this.currentFps = 0;
+    const fpsEl = this._dom.fpsVal || document.getElementById('aruco-fps-val');
+    if (fpsEl) fpsEl.textContent = '-- FPS';
     const statusBadge = this._dom.statusBadge || document.getElementById('aruco-status-badge');
     if (statusBadge) {
       statusBadge.className = 'aruco-status-badge ready';
@@ -837,12 +882,22 @@ class ArUcoTrackerUI {
         }
 
         // Apply validated marker IDs and refresh cached lookup map
+        let idsChanged = false;
         this.markerDefinitions.forEach(m => {
           if (Object.prototype.hasOwnProperty.call(newIds, m.key)) {
+            if (this.idMapping[m.key] !== newIds[m.key]) {
+              idsChanged = true;
+            }
             this.idMapping[m.key] = newIds[m.key];
             this.markerStates[m.key].id = newIds[m.key];
           }
         });
+        if (idsChanged && window.arucoFieldTracker) {
+          window.arucoFieldTracker.reset();
+          if (window.agilityApp && typeof window.agilityApp._syncArLockButton === 'function') {
+            window.agilityApp._syncArLockButton();
+          }
+        }
         this._rebuildIdMap();
         this.renderMarkerCards();
         this.renderFieldSvg();

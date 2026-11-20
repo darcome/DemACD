@@ -558,6 +558,16 @@
       this._dropTracking();
     }
 
+    /** Forget camera-specific state (focal length, gyro mount, active pose) when switching cameras. */
+    resetCamera() {
+      this.cal.focal = [];
+      this.cal.focalFit = [];
+      this.cal.focalRatio = null;
+      this.isLocked = false;
+      this._gyro = { prev: null, scores: new Array(CAMERA_MOUNTS.length).fill(0), mount: -1, ref: null };
+      this._dropTracking();
+    }
+
     _dropTracking() {
       this.pose = null;      // smoothed { R, t }
       this.raw = null;       // last accepted unsmoothed { R, t }
